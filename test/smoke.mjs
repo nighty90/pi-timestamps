@@ -77,6 +77,57 @@ async function runCommand(args) {
   return noted.at(-1);
 }
 
+// ── 模拟会话 ────────────────────────────────────────────────────────────
+// pi 在 input hook 之后才把用户消息落盘，这里用同样的顺序维护假分支。
+
+let entrySeq = 0;
+
+function userEntry(content, at = Date.now()) {
+  return {
+    type: "message",
+    timestamp: new Date(at).toISOString(),
+    message: { role: "user", content },
+  };
+}
+
+function makeSession(entries = [], leafId = null) {
+  let leaf = leafId;
+  for (const entry of entries) entry.id ??= `e${(entrySeq += 1)}`;
+  return {
+    getLeafId: () => leaf ?? entries.at(-1)?.id ?? null,
+    // 假会话是线性的：getBranch(fromId) 就是端点及其之前的全部条目
+    getBranch: (fromId) => {
+      const end = fromId === undefined ? entries.length - 1 : entries.findIndex((e) => e.id === fromId);
+      return end < 0 ? [] : entries.slice(0, end + 1);
+    },
+    getEntry: (id) => entries.find((entry) => entry.id === id),
+    switchLeaf: (id) => {
+      leaf = id;
+    },
+    push(entry) {
+      const stored = { id: `e${(entrySeq += 1)}`, ...entry };
+      entries.push(stored);
+      return stored;
+    },
+  };
+}
+
+/** input hook 的 ctx：会话记录来自假 session。 */
+function inputCtx(session) {
+  return {
+    mode: "plain",
+    sessionManager: session,
+    ui: { getEditorText: () => "", setEditorText: () => {} },
+  };
+}
+
+/** 发送一条消息：hook 返回后按 pi 的顺序把消息落盘。 */
+async function send(handlers, session, text) {
+  const result = await handlers.input({ type: "input", text }, inputCtx(session));
+  session.push(userEntry(result.action === "transform" ? result.text : text));
+  return result;
+}
+
 // ── 1. 配置文件缺失/为空：默认值展示与参数校验 ──────────────────────────
 writeConfig(null);
 {
@@ -125,8 +176,7 @@ writeConfig(null);
 writeConfig('{"enabled":false,"thresholdMinutes":5}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" }, historyCtx([]));
-  check("off 时不注入", await handlers.input({ type: "input", text: "第一条" }), {
+  check("off 时不注入", await send(handlers, makeSession(), "第一条"), {
     action: "continue",
   });
 }
@@ -134,8 +184,8 @@ writeConfig('{"enabled":false,"thresholdMinutes":5}');
 writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" }, historyCtx([]));
-  const first = await handlers.input({ type: "input", text: "第一条" });
+  const session = makeSession();
+  const first = await send(handlers, session, "第一条");
   check("gap 0 首条为 transform", first.action, "transform");
   check(
     "首条只有时间、没有 gap 段",
@@ -144,7 +194,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
     ),
     true,
   );
-  const second = await handlers.input({ type: "input", text: "第二条" });
+  const second = await send(handlers, session, "第二条");
   check("gap 0 时每条都注入", second.action, "transform");
   check("后续消息带 gap 段", /\| gap: 0s\]$/.test(second.text), true);
 }
@@ -152,17 +202,21 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 writeConfig('{"enabled":true,"thresholdMinutes":5}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" }, historyCtx([]));
-  await handlers.input({ type: "input", text: "第一条" });
-  check("未超阈值不注入", await handlers.input({ type: "input", text: "第二条" }), {
+  const session = makeSession();
+  await send(handlers, session, "第一条");
+  check("未超阈值不注入", await send(handlers, session, "第二条"), {
     action: "continue",
   });
-  check("斜杠命令不注入", await handlers.input({ type: "input", text: "/skill:foo" }), {
-    action: "continue",
-  });
-  check("带前导空格的斜杠命令不注入", await handlers.input({ type: "input", text: "   /template a" }), {
-    action: "continue",
-  });
+  check(
+    "斜杠命令不注入",
+    await handlers.input({ type: "input", text: "/skill:foo" }, inputCtx(session)),
+    { action: "continue" },
+  );
+  check(
+    "带前导空格的斜杠命令不注入",
+    await handlers.input({ type: "input", text: "   /template a" }, inputCtx(session)),
+    { action: "continue" },
+  );
 }
 
 // ── 4. 参数补全 ────────────────────────────────────────────────────────
@@ -272,7 +326,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   };
   await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
   await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
-  const sent = await handlers.input({ type: "input", text: `${restoredText}补充一句` });
+  const sent = await send(handlers, makeSession(), `${restoredText}补充一句`);
   check("兜底剥掉回填带来的后缀", sent.text.startsWith("早期消息补充一句\n\n[2026-"), true);
   check("兜底只保留一处时间戳", sent.text.split("\n\n[").length - 1, 1);
 }
@@ -280,8 +334,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   // 直接粘贴带后缀的已发消息
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" }, historyCtx([]));
-  const sent = await handlers.input({ type: "input", text: `粘贴的已发消息${GAP_SUFFIX}` });
+  const sent = await send(handlers, makeSession(), `粘贴的已发消息${GAP_SUFFIX}`);
   check("粘贴已发消息时剥掉尾部后缀", sent.text.startsWith("粘贴的已发消息\n\n[2026-"), true);
   check("粘贴已发消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
 }
@@ -289,117 +342,81 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   // 认不出的方括号后缀按原样保留，本插件的后缀另行追加
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" }, historyCtx([]));
-  const sent = await handlers.input({ type: "input", text: `历史消息${FOREIGN_SUFFIX}` });
+  const sent = await send(handlers, makeSession(), `历史消息${FOREIGN_SUFFIX}`);
   check("认不出的后缀保留", sent.text.startsWith("历史消息\n\n[2026-10-16 Fri 12:25]"), true);
   check("认不出的正文保留且追加后缀", sent.text.split("\n\n[").length - 1, 2);
 }
 
-// ── 6. 历史时间推断：从后缀续上时间账 ───────────────────────────────────
-// 用插件同款格式渲染任意时区的后缀，作为分支里的历史消息
-function renderSuffix(epochMs, offsetMinutes) {
-  const pad = (n) => String(n).padStart(2, "0");
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const local = new Date(epochMs + offsetMinutes * 60_000);
-  const hours = Math.trunc(Math.abs(offsetMinutes) / 60);
-  const minutes = Math.abs(offsetMinutes) % 60;
-  const tz = `${offsetMinutes < 0 ? "-" : "+"}${hours}${minutes > 0 ? `:${pad(minutes)}` : ""}`;
-  const time =
-    `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ` +
-    `${weekdays[local.getUTCDay()]} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())} UTC${tz}`;
-  return `\n\n[${time} | gap: 5m]`;
-}
-
-function userEntry(content) {
-  return { type: "message", message: { role: "user", content } };
-}
-
-function historyCtx(branch) {
-  return {
-    mode: "plain",
-    sessionManager: {
-      getBranch: () => branch,
-      getEntry: (id) => branch.find((entry) => entry.id === id),
-    },
-    ui: { getEditorText: () => "", setEditorText: () => {} },
-  };
-}
-
+// ── 6. 上一条消息时间：读会话条目的 timestamp ───────────────────────────
 writeConfig('{"enabled":true,"thresholdMinutes":0}');
+
 {
-  // resume 后：上一条消息 90 分钟前，gap 应续上而不是从零开始
+  // resume：分支末条用户消息在 90 分钟前，gap 应续上而不是从零开始
   const { handlers } = await loadPlugin();
-  const branch = [userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`)];
-  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("resume 后从后缀续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
-}
-
-
-{
-  // 时区换算：UTC-9 与 UTC+5:30 也要算出同样的 90 分钟
-  for (const offsetMinutes of [-540, 330]) {
-    const { handlers } = await loadPlugin();
-    const branch = [userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, offsetMinutes)}`)];
-    await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-    const sent = await handlers.input({ type: "input", text: "继续" });
-    check(`时区 ${offsetMinutes} 分钟偏移解析正确`, /\| gap: 1h30m\]$/.test(sent.text), true);
-  }
+  const session = makeSession([userEntry("旧消息", Date.now() - 90 * 60_000)]);
+  const sent = await send(handlers, session, "继续");
+  check("resume 后从条目时间续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
 }
 
 {
-  // 分支上没有可解析的后缀：回退到"本次没有上一条消息"（首条格式，无 gap 段）
+  // 叶子通常是助手/工具条目：跳过它们，取最近一条用户消息
   const { handlers } = await loadPlugin();
-  const branch = [userEntry("没有后缀的旧消息")];
-  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("无后缀时回退为首条格式", /^继续\n\n\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?\]$/.test(sent.text), true);
+  const session = makeSession([
+    userEntry("旧消息", Date.now() - 90 * 60_000),
+    {
+      type: "message",
+      timestamp: new Date().toISOString(),
+      message: { role: "assistant", content: "回答" },
+    },
+    {
+      type: "message",
+      timestamp: new Date().toISOString(),
+      message: { role: "toolResult", content: "结果" },
+    },
+    { type: "custom_message", timestamp: new Date().toISOString(), content: "自定义消息" },
+  ]);
+  const sent = await send(handlers, session, "继续");
+  check("跳过助手、工具与自定义消息取用户消息", /\| gap: 1h30m\]$/.test(sent.text), true);
 }
 
 {
-  // 最近一条用户消息没有后缀时不再往前找：回退成不带 gap 段
+  // 分支上没有用户消息：按首条消息处理，不写 gap 段
   const { handlers } = await loadPlugin();
-  const branch = [
-    userEntry(`更早的消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`),
-    userEntry("/skill:foo"),
-  ];
-  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("最近一条用户消息无后缀时不回退着找", /\| gap: /.test(sent.text), false);
+  const sent = await send(handlers, makeSession(), "继续");
+  check(
+    "没有用户消息时用首条格式",
+    /^继续\n\n\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?\]$/.test(
+      sent.text,
+    ),
+    true,
+  );
 }
 
 {
-  // /tree 换分支后同样续上时间账
+  // 斜杠命令不注入，也不推进时间账：下一条仍从更早的用户消息算
   const { handlers } = await loadPlugin();
-  const branch = [userEntry(`分支消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`)];
-  await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("/tree 换分支后从后缀续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
+  const session = makeSession([userEntry("更早的消息", Date.now() - 90 * 60_000)]);
+  check(
+    "斜杠命令返回 continue",
+    await handlers.input({ type: "input", text: "/timestamp" }, inputCtx(session)),
+    { action: "continue" },
+  );
+  const sent = await send(handlers, session, "继续");
+  check("斜杠命令后仍从更早的消息算 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
 }
 
 {
-  // 叶子通常是助手/工具消息：跳过它们，取最近一条用户消息的后缀
+  // /tree 跳到旧分支：叶子换了，gap 从新叶子所在分支的末条用户消息算起
   const { handlers } = await loadPlugin();
-  const branch = [
-    userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`),
-    { type: "message", message: { role: "assistant", content: "回答" } },
-    { type: "message", message: { role: "toolResult", content: "结果" } },
-  ];
-  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("跳过助手与工具条目取用户消息", /\| gap: 1h30m\]$/.test(sent.text), true);
+  const session = makeSession([
+    userEntry("旧分支的消息", Date.now() - 90 * 60_000),
+    userEntry("新分支的消息", Date.now() - 60_000),
+  ]);
+  const [older] = session.getBranch();
+  session.switchLeaf(older.id);
+  const sent = await send(handlers, session, "继续");
+  check("/tree 换叶子后从新叶子续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
 }
 
-{
-  // 只看用户消息：自定义消息带后缀也不算数，最近一条用户消息没后缀就回退
-  const { handlers } = await loadPlugin();
-  const branch = [
-    userEntry("没有后缀的用户消息"),
-    { type: "custom_message", content: `自定义消息${renderSuffix(Date.now() - 90 * 60_000, 480)}` },
-  ];
-  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
-  const sent = await handlers.input({ type: "input", text: "继续" });
-  check("自定义消息不参与时间推断", /\| gap: /.test(sent.text), false);
-}
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

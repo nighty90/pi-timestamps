@@ -68,19 +68,3 @@ export function buildTimestampSuffix(now: number, prev: number | null): string {
   return `\n\n[${time} | gap: ${formatElapsed(now - prev)}]`;
 }
 
-/** 从后缀解析出注入时刻（毫秒），解析不到返回 null。 */
-export function parseSuffixTimestamp(text: string): number | null {
-  const block = /\n*\[([^\]\n]*)\]\s*$/.exec(text);
-  if (!block) return null;
-  const fields =
-    /^(\d{4})-(\d{2})-(\d{2}) [A-Z][a-z]{2} (\d{2}):(\d{2}) UTC([+-])(\d{1,2})(?::(\d{2}))?/.exec(
-      block[1],
-    );
-  if (!fields) return null;
-
-  const [year, month, day, hour, minute] = fields.slice(1, 6).map(Number);
-  const sign = fields[6] === "+" ? 1 : -1;
-  const offsetMinutes = sign * (Number(fields[7]) * 60 + Number(fields[8] ?? 0));
-  // 后缀里写的是本地时间，减去时区偏移得到 UTC 时刻
-  return Date.UTC(year, month - 1, day, hour, minute) - offsetMinutes * 60_000;
-}

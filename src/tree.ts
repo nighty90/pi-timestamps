@@ -1,4 +1,4 @@
-import { parseSuffixTimestamp, stripTimestampSuffix } from "./format.ts";
+import { stripTimestampSuffix } from "./format.ts";
 import { state } from "./state.ts";
 
 /** 把消息 content 转成 pi 回填编辑器时的文本形式：文本块直接拼接。 */
@@ -17,20 +17,18 @@ function contentToText(content: unknown): string {
     .join("");
 }
 
-/** /tree 回填只需区分用户消息与自定义消息，其余类型不参与。 */
-export type EditorRestoreEntry =
-  | { type?: string; message?: { role?: string; content?: unknown }; content?: unknown }
+/** 会话条目的最小形状：回填读文本、推断读时间，其余字段不关心。 */
+export type SessionEntryLike =
+  | {
+      type?: string;
+      timestamp?: string;
+      message?: { role?: string; content?: unknown };
+      content?: unknown;
+    }
   | undefined;
 
-/** 条目是用户消息时返回其文本，否则 null（只认 type: "message" 与 role: "user"）。 */
-function entryUserText(entry: EditorRestoreEntry): string | null {
-  if (!entry) return null;
-  if (entry.type !== "message" || entry.message?.role !== "user") return null;
-  return contentToText(entry.message.content);
-}
-
 /** `/tree` 回填的文本来源：用户消息取 `message.content`，自定义消息取 `content`。 */
-function entryRestoreText(entry: EditorRestoreEntry): string | null {
+function entryRestoreText(entry: SessionEntryLike): string | null {
   if (!entry) return null;
   if (entry.type === "message" && entry.message?.role === "user") {
     return contentToText(entry.message.content);
@@ -46,7 +44,7 @@ function entryRestoreText(entry: EditorRestoreEntry): string | null {
  * 发送端用于定位并剥除回填文本里的后缀。
  */
 export function readRestoredEditorText(
-  sessionManager: { getEntry(id: string): EditorRestoreEntry },
+  sessionManager: { getEntry(id: string): SessionEntryLike },
   targetId: string | null,
 ): string | null {
   if (!targetId) return null;
@@ -69,19 +67,20 @@ export function stripRestoredSuffixes(rawText: string): string {
 }
 
 /**
- * 从分支上最近一条用户消息的后缀推断上次注入时刻；解析不出来返回 null，
- * 不往前找更早的消息。
+ * 分支上最近一条用户消息的落盘时刻（毫秒）。会话恢复与 /tree 换分支后叶子已经
+ * 指向目标条目，故不需要外部传入 id；没有用户消息返回 null。
  */
-export function inferLastMessageAt(
-  sessionManager: { getBranch(fromId?: string): EditorRestoreEntry[] },
-  fromId: string | null,
-): number | null {
-  const branch = sessionManager.getBranch(fromId ?? undefined);
+export function lastUserMessageAt(session: {
+  getLeafId(): string | null;
+  getBranch(fromId?: string): SessionEntryLike[];
+}): number | null {
+  const branch = session.getBranch(session.getLeafId() ?? undefined);
   for (let index = branch.length - 1; index >= 0; index -= 1) {
-    // assistant / toolResult / 各类记录条目没有用户文本，跳过它们
-    const text = entryUserText(branch[index]);
-    if (text === null) continue;
-    return parseSuffixTimestamp(text);
+    const entry = branch[index];
+    // assistant / toolResult / 各类记录条目不是用户消息，跳过它们
+    if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+    const at = Date.parse(entry.timestamp ?? "");
+    return Number.isNaN(at) ? null : at;
   }
   return null;
 }
