@@ -1,7 +1,7 @@
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InputEventResult } from "@earendil-works/pi-coding-agent";
 
 /**
  * 给用户消息自动加上当前时间戳，让模型感知每条消息的时间。
@@ -19,6 +19,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  *
  * 配置缺失或字段无效时回退到默认值。
  */
+
+// ── 时间格式化 ──────────────────────────────────────────────────────────
 
 /** getDay() 返回 0(周日)~6，映射到英文缩写。 */
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -65,6 +67,8 @@ function formatElapsed(ms: number): string {
   return parts.join("");
 }
 
+// ── 时间戳后缀 ──────────────────────────────────────────────────────────
+
 /** 注入到消息末尾的时间戳后缀，形如
  * `[Time: 2026-10-16 Fri 12:25 UTC+8 | Since last: 5m]`。 */
 const TIMESTAMP_SUFFIX_RE = /\s*\[Time: [^\]\n]*\]\s*$/;
@@ -78,6 +82,28 @@ function stripTimestampSuffix(text: string): string {
     result = next;
   }
 }
+
+/** 组装注入后缀；prev 为 null 表示本次会话还没有上一条消息。 */
+function buildTimestampSuffix(now: number, prev: number | null): string {
+  const sinceLast = prev === null ? "start of run" : formatElapsed(now - prev);
+  return `\n\n[Time: ${formatTimestamp(new Date(now))} | Since last: ${sinceLast}]`;
+}
+
+// ── 运行期状态 ──────────────────────────────────────────────────────────
+
+/** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，因此重启后的首条消息会显示 start of run。 */
+let lastMessageAt: number | null = null;
+
+/** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填。 */
+let pendingEditorText: string | null = null;
+
+/** /tree 回填到编辑器的原文（含旧时间戳）；null 表示下一条输入不是回填内容。 */
+let restoredEditorText: string | null = null;
+
+/** 本插件对所有"不注入"分支返回同一个动作。 */
+const SKIP: InputEventResult = { action: "continue" };
+
+// ── /tree 回填 ──────────────────────────────────────────────────────────
 
 /** 把消息 content 转成 pi 回填编辑器时的文本形式：文本块直接拼接。 */
 function contentToText(content: unknown): string {
@@ -95,6 +121,11 @@ function contentToText(content: unknown): string {
     .join("");
 }
 
+/** /tree 回填只需区分用户消息与自定义消息，其余类型不参与。 */
+type EditorRestoreEntry =
+  | { type?: string; message?: { role?: string; content?: unknown }; content?: unknown }
+  | undefined;
+
 /**
  * /tree 跳转到用户消息时，pi 会把该消息原文回填到输入框（见 navigateTree 的
  * editorText）。原文末尾带旧时间戳，需要在两个环节处理：
@@ -105,13 +136,11 @@ function contentToText(content: unknown): string {
  *    startsWith 定位并替换那一段，用户在其后继续打字也不受影响。
  */
 function readRestoredEditorText(
-  sessionManager: { getEntry(id: string): unknown },
+  sessionManager: { getEntry(id: string): EditorRestoreEntry },
   targetId: string | null,
 ): string | null {
   if (!targetId) return null;
-  const entry = sessionManager.getEntry(targetId) as
-    | { type?: string; message?: { role?: string; content?: unknown }; content?: unknown }
-    | undefined;
+  const entry = sessionManager.getEntry(targetId);
   if (!entry) return null;
   if (entry.type === "message" && entry.message?.role === "user") {
     return contentToText(entry.message.content);
@@ -122,7 +151,30 @@ function readRestoredEditorText(
   return null;
 }
 
+/**
+ * 发送前剥掉回填带来的旧后缀，返回最终待发送文本。
+ * 兜底路径下旧后缀不一定在末尾（用户可能在回填文本后继续打字），故按记住的
+ * 回填原文前缀定位并只替换那一段；随后再兜底剥一次整条消息末尾的残留后缀
+ * （例如直接粘贴了带后缀的旧消息）。
+ */
+function stripRestoredSuffixes(rawText: string): string {
+  const restored = restoredEditorText;
+  restoredEditorText = null;
+
+  let text = rawText;
+  if (restored !== null && text.startsWith(restored)) {
+    const strippedRestored = stripTimestampSuffix(restored);
+    if (strippedRestored !== restored) {
+      text = strippedRestored + text.slice(restored.length);
+    }
+  }
+  return stripTimestampSuffix(text);
+}
+
+// ── 配置 ────────────────────────────────────────────────────────────────
+
 const DEFAULT_THRESHOLD_MINUTES = 5;
+const CONFIG_FILE_NAME = "config.json";
 
 /**
  * 插件自身目录，用于定位同级的 config.json。pi 用 jiti 以 CJS 形式加载扩展、
@@ -132,35 +184,56 @@ function getExtensionDir(): string {
   return typeof __dirname === "string" ? __dirname : dirname(fileURLToPath(import.meta.url));
 }
 
-/** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，因此重启后的首条消息会显示 start of run。 */
-let lastMessageAt: number | null = null;
+/** config.json 的绝对路径（插件目录下）。 */
+function getConfigPath(): string {
+  return join(getExtensionDir(), CONFIG_FILE_NAME);
+}
 
-/** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填。 */
-let pendingEditorText: string | null = null;
-
-/** /tree 回填到编辑器的原文（含旧时间戳）；null 表示下一条输入不是回填内容。 */
-let restoredEditorText: string | null = null;
-
-/** 读取 config.json 里的阈值（毫秒），无效时回退默认。 */
-function loadThresholdMs(): number {
-  const configPath = join(getExtensionDir(), "config.json");
-  const fallback = DEFAULT_THRESHOLD_MINUTES * 60 * 1000;
+/** 读 config.json 原始对象；文件缺失、解析失败或不是对象时返回 null。 */
+function readConfigFile(): Record<string, unknown> | null {
+  const configPath = getConfigPath();
+  if (!existsSync(configPath)) return null;
   try {
-    if (!existsSync(configPath)) return fallback;
-    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
-      thresholdMinutes?: unknown;
-    };
-    const minutes = raw.thresholdMinutes;
-    if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes < 0) {
-      return fallback;
-    }
-    return minutes * 60 * 1000;
+    const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
+/** 分钟数合法：非负整数。 */
+function isValidMinutes(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/** 文件里的 thresholdMinutes：是合法分钟数才返回，否则 null（视为未配置）。 */
+function fileThresholdMinutes(raw: Record<string, unknown> | null): number | null {
+  const value = raw?.thresholdMinutes;
+  return isValidMinutes(value) ? value : null;
+}
+
+/** 读取 config.json 里的阈值（毫秒），无效时回退默认。 */
+function loadThresholdMs(): number {
+  const minutes = fileThresholdMinutes(readConfigFile());
+  return (minutes ?? DEFAULT_THRESHOLD_MINUTES) * 60 * 1000;
+}
+
 const THRESHOLD_MS = loadThresholdMs();
+
+// ── 输入处理 ────────────────────────────────────────────────────────────
+
+/**
+ * 斜杠命令不能加后缀：pi 在 input hook 之后才展开 /skill: 与 prompt template，
+ * 而 _expandSkillCommand 用 indexOf(" ") 切技能名，后缀里的空格会把技能名切成
+ * "foo\n\n[Time:"，查不到技能便原样放行。prompt template 的正则同样会把后缀
+ * 当作参数污染 $ARGUMENTS。
+ */
+function isSlashCommand(text: string): boolean {
+  return text.trimStart().startsWith("/");
+}
+
+// ── 扩展入口 ────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
   // 切换到另一个会话（/new、/resume、/fork）时重置
@@ -201,55 +274,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event) => {
-    // 兜底路径：正常已由 session_tree 抢先把干净文本写进编辑器，这里只在回填未被
-    // 劫持时生效——记住的回填原文带旧时间戳，用户在回填文本后面继续打字后旧后缀就不
-    // 在末尾，无法按后缀匹配剥离，故用 startsWith 定位并只替换那一段。
-    let text = event.text;
-    const restored = restoredEditorText;
-    restoredEditorText = null;
-    if (restored !== null && text.startsWith(restored)) {
-      const strippedRestored = stripTimestampSuffix(restored);
-      if (strippedRestored !== restored) {
-        text = strippedRestored + text.slice(restored.length);
-      }
-    }
-    // 兜底：整条消息末尾残留的后缀（例如直接粘贴带后缀的旧消息）。
-    text = stripTimestampSuffix(text);
+    const text = stripRestoredSuffixes(event.text);
 
-    // 跳过纯图片消息（无文本）
-    if (!text || !text.trim()) {
-      return { action: "continue" };
-    }
+    // 纯图片消息没有文本：不注入，也不推进时间账
+    if (text.trim() === "") return SKIP;
 
-    // 记录上一条消息的时间并更新
+    // 时间账无条件推进，因此发斜杠命令不会让下一条消息的间隔失真
     const now = Date.now();
     const prev = lastMessageAt;
     lastMessageAt = now;
 
-    // 斜杠命令不能加后缀：pi 在 input hook 之后才展开 /skill: 与 prompt template，
-    // 而 _expandSkillCommand 用 indexOf(" ") 切技能名，后缀里的空格会把技能名切成
-    // "foo\n\n[Time:"，查不到技能便原样放行。prompt template 的正则同样会把后缀
-    // 当作参数污染 $ARGUMENTS。时间账照记，只是不注入。
-    if (text.trimStart().startsWith("/")) {
-      return { action: "continue" };
-    }
+    if (isSlashCommand(text)) return SKIP;
+    if (prev !== null && now - prev < THRESHOLD_MS) return SKIP;
 
-    // 跳过间隔小于阈值的消息
-    if (prev !== null && now - prev < THRESHOLD_MS) {
-      return { action: "continue" };
-    }
-
-    let sinceLast: string;
-    if (prev === null) {
-      sinceLast = "start of run";
-    } else {
-      sinceLast = formatElapsed(now - prev);
-    }
-    const timestamp = `\n\n[Time: ${formatTimestamp(new Date())} | Since last: ${sinceLast}]`;
-
-    return {
-      action: "transform",
-      text: text + timestamp,
-    };
+    return { action: "transform", text: text + buildTimestampSuffix(now, prev) };
   });
 }
