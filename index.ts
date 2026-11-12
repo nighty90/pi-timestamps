@@ -219,6 +219,14 @@ export default function (pi: ExtensionAPI) {
     const prev = lastMessageAt;
     lastMessageAt = now;
 
+    // 斜杠命令不能加后缀：pi 在 input hook 之后才展开 /skill: 与 prompt template，
+    // 而 _expandSkillCommand 用 indexOf(" ") 切技能名，后缀里的空格会把技能名切成
+    // "foo\n\n[Time:"，查不到技能便原样放行。prompt template 的正则同样会把后缀
+    // 当作参数污染 $ARGUMENTS。时间账照记，只是不注入。
+    if (text.trimStart().startsWith("/")) {
+      return { action: "continue" };
+    }
+
     // 跳过间隔小于阈值的消息
     if (prev !== null && now - prev < THRESHOLD_MS) {
       return { action: "continue" };
