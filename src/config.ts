@@ -1,20 +1,16 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_THRESHOLD_MINUTES = 5;
 const CONFIG_FILE_NAME = "config.json";
+const EXTENSION_ID = "pi-timestamps";
 const USAGE = "usage: /timestamp | /timestamp on | /timestamp off | /timestamp gap <minutes>";
 
-/** 包根目录：本文件在 `<包根>/src/`，从自身文件 URL 上溯两级。 */
-function getPackageDir(): string {
-  return dirname(dirname(fileURLToPath(import.meta.url)));
-}
-
-/** config.json 的绝对路径（包根目录下）。 */
+/** config.json 的绝对路径：`<agent 目录>/extensions/pi-timestamps/config.json`。 */
 function getConfigPath(): string {
-  return join(getPackageDir(), CONFIG_FILE_NAME);
+  return join(getAgentDir(), "extensions", EXTENSION_ID, CONFIG_FILE_NAME);
 }
 
 /** 读 config.json 原始对象；文件缺失、解析失败或不是对象时返回 null。 */
@@ -47,13 +43,25 @@ function fileThresholdMinutes(raw: Record<string, unknown> | null): number | nul
   return isValidMinutes(value) ? value : null;
 }
 
-/** 把补丁合并进 config.json（保留文件里的其它字段），写入失败返回 false。 */
+/**
+ * 把补丁合并进 config.json（保留文件里的其它字段），写入失败返回 false。
+ * 先写同目录临时文件再 rename，避免留下半截 JSON。
+ */
 function saveConfig(patch: Record<string, unknown>): boolean {
   const merged = { ...(readConfigFile() ?? {}), ...patch };
+  const configPath = getConfigPath();
+  const tempPath = `${configPath}.tmp`;
   try {
-    writeFileSync(getConfigPath(), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(tempPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+    renameSync(tempPath, configPath);
     return true;
   } catch {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // 清理失败不影响返回值
+    }
     return false;
   }
 }

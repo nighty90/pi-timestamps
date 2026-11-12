@@ -51,11 +51,8 @@ lerna-debug.log*
 # *.bak
 # lol_this_is_my_super_secret_credential_file.json
 
-# 本地运行配置（每台机器不同，默认值写在 index.ts 的 DEFAULT_THRESHOLD_MINUTES）
-config.json
-
 # 测试生成物（smoke.mjs 把 index.ts 与 src/ 复制到 test/.sandbox/ 下加载，
-# 配置也随之落在 test/.sandbox/config.json）
+# 配置也随之落在 test/.sandbox/agent/extensions/pi-timestamps/config.json）
 test/.sandbox/
 
 # node (local)

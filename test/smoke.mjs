@@ -2,19 +2,21 @@
 // 直接调用命令 handler 与 input hook，检查配置读写、参数补全与注入行为。
 // 用法：node test/smoke.mjs
 //
-// 说明：config.json 由 src/config.ts 按「自身文件上溯两级」定位，所以这里把
-// index.ts 与 src/ 整棵复制进 test/.sandbox/，配置随之落在 test/.sandbox/config.json，
-// 不会碰到仓库根目录里真实使用的 config.json。
+// 说明：config.json 由 src/config.ts 按 pi 的 agent 目录定位，所以这里把
+// index.ts 与 src/ 整棵复制进 test/.sandbox/，并把 PI_CODING_AGENT_DIR 指向
+// test/.sandbox/agent，让配置落在沙箱内，不会碰到真实使用的配置文件。
 
-import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(testDir);
 const sandboxDir = join(testDir, ".sandbox");
+const sandboxAgentDir = join(sandboxDir, "agent");
 const sandboxFile = join(sandboxDir, "index.ts");
-const configPath = join(sandboxDir, "config.json");
+const configPath = join(sandboxAgentDir, "extensions", "pi-timestamps", "config.json");
+process.env.PI_CODING_AGENT_DIR = sandboxAgentDir;
 const jitiLoaderPath = join(
   repoRoot,
   "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/jiti-loader.js",
@@ -44,7 +46,10 @@ async function loadPlugin() {
   rmSync(sandboxDir, { recursive: true, force: true });
   cpSync(join(repoRoot, "index.ts"), sandboxFile, { recursive: true });
   cpSync(join(repoRoot, "src"), join(sandboxDir, "src"), { recursive: true });
-  if (pendingConfig !== null) writeFileSync(configPath, pendingConfig, "utf8");
+  if (pendingConfig !== null) {
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, pendingConfig, "utf8");
+  }
   const { createJiti } = await import(jitiLoaderPath);
   const jiti = createJiti(import.meta.url, { moduleCache: false });
   const factory = await jiti.import(sandboxFile, { default: true });
@@ -102,6 +107,18 @@ writeConfig('{"foo":1,"thresholdMinutes":3,"enabled":false}');
 
   await runCommand("on");
   check("on 写回 enabled", JSON.parse(readFileSync(configPath, "utf8")).enabled, true);
+}
+
+// ── 2b. 配置落在 agent 目录的扩展子目录：自动建目录、原子写不留临时文件 ──
+writeConfig(null);
+{
+  check("配置路径在 agent 目录内", configPath.startsWith(sandboxAgentDir), true);
+  await runCommand("gap 9");
+  check("目录不存在时写入自动建目录", existsSync(configPath), true);
+  check("写入内容为合法配置", JSON.parse(readFileSync(configPath, "utf8")), {
+    thresholdMinutes: 9,
+  });
+  check("写入后无残留临时文件", existsSync(`${configPath}.tmp`), false);
 }
 
 // ── 3. 注入行为：off / gap 0 / 阈值 / 斜杠命令 ──────────────────────────
