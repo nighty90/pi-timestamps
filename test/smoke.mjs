@@ -99,7 +99,7 @@ writeConfig('{"foo":1,"thresholdMinutes":3,"enabled":false}');
 writeConfig('{"enabled":false,"thresholdMinutes":5}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" });
+  handlers.session_start({ reason: "new" }, historyCtx([]));
   check("off 时不注入", await handlers.input({ type: "input", text: "第一条" }), {
     action: "continue",
   });
@@ -108,7 +108,7 @@ writeConfig('{"enabled":false,"thresholdMinutes":5}');
 writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" });
+  handlers.session_start({ reason: "new" }, historyCtx([]));
   const first = await handlers.input({ type: "input", text: "第一条" });
   check("gap 0 首条为 transform", first.action, "transform");
   check(
@@ -126,7 +126,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 writeConfig('{"enabled":true,"thresholdMinutes":5}');
 {
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" });
+  handlers.session_start({ reason: "new" }, historyCtx([]));
   await handlers.input({ type: "input", text: "第一条" });
   check("未超阈值不注入", await handlers.input({ type: "input", text: "第二条" }), {
     action: "continue",
@@ -163,6 +163,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   const ctx = {
     mode: "tui",
     sessionManager: {
+      getBranch: () => [],
       getEntry: (id) =>
         id === "u1" ? { type: "message", message: { role: "user", content: restoredText } } : undefined,
     },
@@ -178,6 +179,26 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
   await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
   check("回填端写入剥净文本", editor.writes, ["早期消息"]);
+
+  editor.writes.length = 0;
+  // 自定义消息条目同样会被 pi 回填，也要剥净
+  const customCtx = {
+    mode: "tui",
+    sessionManager: {
+      getBranch: () => [],
+      getEntry: () =>
+        ({ type: "custom_message", content: `自定义早期消息${NEW_SUFFIX}` }),
+    },
+    ui: {
+      getEditorText: () => "",
+      setEditorText: (value) => {
+        editor.writes.push(value);
+      },
+    },
+  };
+  await handlers.session_before_tree({ preparation: { targetId: "c1" } }, customCtx);
+  await handlers.session_tree({ newLeafId: "c1", oldLeafId: "x" }, customCtx);
+  check("自定义消息回填也剥净", editor.writes, ["自定义早期消息"]);
 
   // 编辑器里已有草稿：不覆盖
   editor.text = "草稿";
@@ -195,6 +216,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   const ctx = {
     mode: "tui",
     sessionManager: {
+      getBranch: () => [],
       getEntry: () =>
         ({ type: "message", message: { role: "user", content: `首条消息${FIRST_SUFFIX}` } }),
     },
@@ -217,6 +239,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   const ctx = {
     mode: "plain",
     sessionManager: {
+      getBranch: () => [],
       getEntry: () => ({ type: "message", message: { role: "user", content: restoredText } }),
     },
     ui: { getEditorText: () => "", setEditorText: () => {} },
@@ -231,7 +254,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   // 直接粘贴带后缀的旧文本
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" });
+  handlers.session_start({ reason: "new" }, historyCtx([]));
   const sent = await handlers.input({ type: "input", text: `粘贴的旧消息${NEW_SUFFIX}` });
   check("粘贴旧消息时剥掉尾部后缀", sent.text.startsWith("粘贴的旧消息\n\n[2026-"), true);
   check("粘贴旧消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
@@ -240,10 +263,117 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
   // 旧版 [Time: …] 后缀按设计不再剥除：保留原文，新后缀另行追加
   const { handlers } = await loadPlugin();
-  handlers.session_start({ reason: "new" });
+  handlers.session_start({ reason: "new" }, historyCtx([]));
   const sent = await handlers.input({ type: "input", text: `历史消息${LEGACY_SUFFIX}` });
   check("旧格式后缀保留", sent.text.startsWith("历史消息\n\n[Time: 2026-10-16"), true);
   check("旧格式正文保留且追加新后缀", sent.text.split("\n\n[").length - 1, 2);
+}
+
+// ── 6. 历史时间推断：从后缀续上时间账 ───────────────────────────────────
+// 用插件同款格式渲染任意时区的后缀，作为分支里的历史消息
+function renderSuffix(epochMs, offsetMinutes) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const local = new Date(epochMs + offsetMinutes * 60_000);
+  const hours = Math.trunc(Math.abs(offsetMinutes) / 60);
+  const minutes = Math.abs(offsetMinutes) % 60;
+  const tz = `${offsetMinutes < 0 ? "-" : "+"}${hours}${minutes > 0 ? `:${pad(minutes)}` : ""}`;
+  const time =
+    `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ` +
+    `${weekdays[local.getUTCDay()]} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())} UTC${tz}`;
+  return `\n\n[${time} | gap: 5m]`;
+}
+
+function userEntry(content) {
+  return { type: "message", message: { role: "user", content } };
+}
+
+function historyCtx(branch) {
+  return {
+    mode: "plain",
+    sessionManager: {
+      getBranch: () => branch,
+      getEntry: (id) => branch.find((entry) => entry.id === id),
+    },
+    ui: { getEditorText: () => "", setEditorText: () => {} },
+  };
+}
+
+writeConfig('{"enabled":true,"thresholdMinutes":0}');
+{
+  // resume 后：上一条消息 90 分钟前，gap 应续上而不是从零开始
+  const { handlers } = await loadPlugin();
+  const branch = [userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`)];
+  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("resume 后从后缀续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
+}
+
+
+{
+  // 时区换算：UTC-9 与 UTC+5:30 也要算出同样的 90 分钟
+  for (const offsetMinutes of [-540, 330]) {
+    const { handlers } = await loadPlugin();
+    const branch = [userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, offsetMinutes)}`)];
+    await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+    const sent = await handlers.input({ type: "input", text: "继续" });
+    check(`时区 ${offsetMinutes} 分钟偏移解析正确`, /\| gap: 1h30m\]$/.test(sent.text), true);
+  }
+}
+
+{
+  // 分支上没有可解析的后缀：回退到"本次没有上一条消息"（首条格式，无 gap 段）
+  const { handlers } = await loadPlugin();
+  const branch = [userEntry("没有后缀的旧消息")];
+  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("无后缀时回退为首条格式", /^继续\n\n\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?\]$/.test(sent.text), true);
+}
+
+{
+  // 最近一条用户消息没有后缀时不再往前找：回退成不带 gap 段
+  const { handlers } = await loadPlugin();
+  const branch = [
+    userEntry(`更早的消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`),
+    userEntry("/skill:foo"),
+  ];
+  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("最近一条用户消息无后缀时不回退着找", /\| gap: /.test(sent.text), false);
+}
+
+{
+  // /tree 换分支后同样续上时间账
+  const { handlers } = await loadPlugin();
+  const branch = [userEntry(`分支消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`)];
+  await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("/tree 换分支后从后缀续上 gap", /\| gap: 1h30m\]$/.test(sent.text), true);
+}
+
+{
+  // 叶子通常是助手/工具消息：跳过它们，取最近一条用户消息的后缀
+  const { handlers } = await loadPlugin();
+  const branch = [
+    userEntry(`旧消息${renderSuffix(Date.now() - 90 * 60_000, 480)}`),
+    { type: "message", message: { role: "assistant", content: "回答" } },
+    { type: "message", message: { role: "toolResult", content: "结果" } },
+  ];
+  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("跳过助手与工具条目取用户消息", /\| gap: 1h30m\]$/.test(sent.text), true);
+}
+
+{
+  // 只看用户消息：自定义消息带后缀也不算数，最近一条用户消息没后缀就回退
+  const { handlers } = await loadPlugin();
+  const branch = [
+    userEntry("没有后缀的用户消息"),
+    { type: "custom_message", content: `自定义消息${renderSuffix(Date.now() - 90 * 60_000, 480)}` },
+  ];
+  await handlers.session_start({ reason: "resume" }, historyCtx(branch));
+  const sent = await handlers.input({ type: "input", text: "继续" });
+  check("自定义消息不参与时间推断", /\| gap: /.test(sent.text), false);
 }
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

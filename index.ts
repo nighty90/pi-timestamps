@@ -13,8 +13,10 @@ import type {
  * 展开和 agent 处理之前。
  *
  * 只在距上一条消息超过阈值时才注入（感知跨时段长会话），连续快速
- * 问答零开销。切换会话（/new、/resume、/fork）或 pi 重启时重置上次
- * 注入时间。后缀形如 `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`，gap 是距
+ * 问答零开销。恢复会话（/resume、/fork）、pi 重启或 `/tree` 换分支后，从当前
+ * 分支最近一条用户消息的后缀把上次注入时刻读回来，时间账因此不断档；该后缀
+ * 解析不出来时按"本次还没有上一条消息"处理。后缀形如
+ * `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`，gap 是距
  * 上一条消息的间隔；会话首条消息没有上一条，只写时间部分。
  *
  * 开关与阈值用 `/timestamp` 命令查看和修改，设置写入同目录的 config.json
@@ -106,7 +108,10 @@ function buildTimestampSuffix(now: number, prev: number | null): string {
 
 // ── 运行期状态 ──────────────────────────────────────────────────────────
 
-/** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，重启后的首条消息因此不带 gap 段。 */
+/**
+ * 上一条消息的毫秒时间戳。进程内状态，在 session_start 与 /tree 换分支时
+ * 从历史消息后缀重新推断（见 inferLastMessageAt），推断不到才为 null。
+ */
 let lastMessageAt: number | null = null;
 
 /** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填。 */
@@ -142,6 +147,29 @@ type EditorRestoreEntry =
   | undefined;
 
 /**
+ * 条目是用户消息时返回其文本内容，否则返回 null。只认 `type: "message"` 且
+ * `role: "user"` 的条目——助手消息、工具结果、各类记录条目、以及扩展注入的
+ * custom_message 都不是用户输入。
+ */
+function entryUserText(entry: EditorRestoreEntry): string | null {
+  if (!entry) return null;
+  if (entry.type !== "message" || entry.message?.role !== "user") return null;
+  return contentToText(entry.message.content);
+}
+
+/** `/tree` 回填的文本来源：用户消息取 `message.content`，自定义消息取 `content`。 */
+function entryRestoreText(entry: EditorRestoreEntry): string | null {
+  if (!entry) return null;
+  if (entry.type === "message" && entry.message?.role === "user") {
+    return contentToText(entry.message.content);
+  }
+  if (entry.type === "custom_message") {
+    return contentToText(entry.content);
+  }
+  return null;
+}
+
+/**
  * /tree 跳转到用户消息时，pi 会把该消息原文回填到输入框（见 navigateTree 的
  * editorText）。原文末尾带旧时间戳，需要在两个环节处理：
  *
@@ -155,15 +183,7 @@ function readRestoredEditorText(
   targetId: string | null,
 ): string | null {
   if (!targetId) return null;
-  const entry = sessionManager.getEntry(targetId);
-  if (!entry) return null;
-  if (entry.type === "message" && entry.message?.role === "user") {
-    return contentToText(entry.message.content);
-  }
-  if (entry.type === "custom_message") {
-    return contentToText(entry.content);
-  }
-  return null;
+  return entryRestoreText(sessionManager.getEntry(targetId));
 }
 
 /**
@@ -184,6 +204,50 @@ function stripRestoredSuffixes(rawText: string): string {
     }
   }
   return stripTimestampSuffix(text);
+}
+
+// ── 历史时间推断 ────────────────────────────────────────────────────────
+
+/**
+ * 从消息末尾的后缀 `[2026-11-12 Thu 15:52 UTC+8 | gap: 5m]` 解析出注入时刻
+ * （毫秒）。首条消息没有 gap 段，照样解析；旧版 `[Time: …]` 不认。
+ * 解析不到返回 null。
+ */
+function parseSuffixTimestamp(text: string): number | null {
+  const block = /\n*\[([^\]\n]*)\]\s*$/.exec(text);
+  if (!block) return null;
+  const fields =
+    /^(\d{4})-(\d{2})-(\d{2}) [A-Z][a-z]{2} (\d{2}):(\d{2}) UTC([+-])(\d{1,2})(?::(\d{2}))?/.exec(
+      block[1],
+    );
+  if (!fields) return null;
+
+  const [year, month, day, hour, minute] = fields.slice(1, 6).map(Number);
+  const sign = fields[6] === "+" ? 1 : -1;
+  const offsetMinutes = sign * (Number(fields[7]) * 60 + Number(fields[8] ?? 0));
+  // 后缀里写的是本地时间，减去时区偏移得到 UTC 时刻
+  return Date.UTC(year, month - 1, day, hour, minute) - offsetMinutes * 60_000;
+}
+
+/**
+ * 从分支上最近一条用户消息的后缀推断上次注入时刻。恢复会话、重载、/tree 换
+ * 分支后进程内状态已失效，用后缀把时间账续上。
+ *
+ * 只看最近一条用户消息：它的后缀解析不出来（斜杠命令、纯图片、旧格式）就返回
+ * null，行为回退到"本次还没有上一条消息"，不再往前找更早的消息。
+ */
+function inferLastMessageAt(
+  sessionManager: { getBranch(fromId?: string): EditorRestoreEntry[] },
+  fromId: string | null,
+): number | null {
+  const branch = sessionManager.getBranch(fromId ?? undefined);
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    // assistant / toolResult / 各类记录条目没有用户文本，跳过它们
+    const text = entryUserText(branch[index]);
+    if (text === null) continue;
+    return parseSuffixTimestamp(text);
+  }
+  return null;
 }
 
 // ── 配置 ────────────────────────────────────────────────────────────────
@@ -342,13 +406,12 @@ function isSlashCommand(text: string): boolean {
 // ── 扩展入口 ────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // 切换到另一个会话（/new、/resume、/fork）时重置
-  pi.on("session_start", async (event) => {
-    if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-      lastMessageAt = null;
-      restoredEditorText = null;
-      pendingEditorText = null;
-    }
+  // 恢复会话（resume/fork）、重载、重启时进程内状态已清空：从当前分支最后
+  // 一条带后缀的用户消息续上时间账；新会话分支为空，自然回退到 null
+  pi.on("session_start", async (_event, ctx) => {
+    restoredEditorText = null;
+    pendingEditorText = null;
+    lastMessageAt = inferLastMessageAt(ctx.sessionManager, null);
   });
 
   // /tree 跳转：用户在选择器里选中的条目才是回填来源。注意不能从 session_tree
@@ -364,9 +427,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_tree", async (event, ctx) => {
-    // /tree 跳到树内另一分支时重置：新分支的首条消息应视为新的起点
+    // /tree 跳到树内另一分支时，从新分支末条带后缀的用户消息续上时间账
     if (event.newLeafId !== event.oldLeafId) {
-      lastMessageAt = null;
+      lastMessageAt = inferLastMessageAt(ctx.sessionManager, event.newLeafId);
     }
 
     // pi 只在编辑器为空时把 editorText 回填进输入框（见 interactive-mode 的
