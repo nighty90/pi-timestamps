@@ -2,18 +2,19 @@
 // 直接调用命令 handler 与 input hook，检查配置读写、参数补全与注入行为。
 // 用法：node test/smoke.mjs
 //
-// 说明：插件目录 = 被加载文件的目录，所以这里把 index.ts 复制成
-// test/.sandbox-index.ts 再加载，配置文件随之落在 test/config.json，
+// 说明：config.json 由 src/config.ts 按「自身文件上溯两级」定位，所以这里把
+// index.ts 与 src/ 整棵复制进 test/.sandbox/，配置随之落在 test/.sandbox/config.json，
 // 不会碰到仓库根目录里真实使用的 config.json。
 
-import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(testDir);
-const sandboxFile = join(testDir, ".sandbox-index.ts");
-const configPath = join(testDir, "config.json");
+const sandboxDir = join(testDir, ".sandbox");
+const sandboxFile = join(sandboxDir, "index.ts");
+const configPath = join(sandboxDir, "config.json");
 const jitiLoaderPath = join(
   repoRoot,
   "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/jiti-loader.js",
@@ -28,14 +29,22 @@ function check(label, actual, expected) {
   if (!ok) failures += 1;
 }
 
-/** 写测试用配置文件；null 写成空文件（等价于未配置，读不到有效字段）。 */
+/**
+ * 指定接下来加载时沙箱里的 config.json 内容。真正的落盘发生在 loadPlugin()
+ * 重建沙箱之后——沙箱目录每次都会被整个删掉重来，提前写会被一并删除。
+ * null 表示写成空文件（等价于未配置，读不到有效字段）。
+ */
+let pendingConfig = null;
 function writeConfig(content) {
-  writeFileSync(configPath, content === null ? "" : content, "utf8");
+  pendingConfig = content === null ? "" : content;
 }
 
-/** 每次都重新加载插件：模块级状态（enabled/gapMs/lastMessageAt）随之重置。 */
+/** 每次都重新加载插件：模块级状态（settings / state）随之重置。 */
 async function loadPlugin() {
-  copyFileSync(join(repoRoot, "index.ts"), sandboxFile);
+  rmSync(sandboxDir, { recursive: true, force: true });
+  cpSync(join(repoRoot, "index.ts"), sandboxFile, { recursive: true });
+  cpSync(join(repoRoot, "src"), join(sandboxDir, "src"), { recursive: true });
+  if (pendingConfig !== null) writeFileSync(configPath, pendingConfig, "utf8");
   const { createJiti } = await import(jitiLoaderPath);
   const jiti = createJiti(import.meta.url, { moduleCache: false });
   const factory = await jiti.import(sandboxFile, { default: true });

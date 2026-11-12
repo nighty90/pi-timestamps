@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  InputEventResult,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { completeSubcommands, runTimestampCommand } from "./src/config.ts";
+import { handleInput } from "./src/input.ts";
+import { state } from "./src/state.ts";
+import {
+  inferLastMessageAt,
+  readRestoredEditorText,
+} from "./src/tree.ts";
+import { stripTimestampSuffix } from "./src/format.ts";
 
 /**
  * 给用户消息自动加上当前时间戳，让模型感知每条消息的时间。
@@ -19,399 +20,28 @@ import type {
  * `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`，gap 是距
  * 上一条消息的间隔；会话首条消息没有上一条，只写时间部分。
  *
- * 开关与阈值用 `/timestamp` 命令查看和修改，设置写入同目录的 config.json
+ * 开关与阈值用 `/timestamp` 命令查看和修改，设置写入包根目录的 config.json
  * 并立即生效（无需 /reload）；也可手工编辑该文件：
  *
- *   <插件目录>/config.json（即本文件同级的 config.json）
+ *   <包根>/config.json
  *   {
  *     "enabled": true,
  *     "thresholdMinutes": 5
  *   }
  *
  * 配置缺失或字段无效时回退到默认值（enabled: true、thresholdMinutes: 5）。
- */
-
-// ── 时间格式化 ──────────────────────────────────────────────────────────
-
-/** getDay() 返回 0(周日)~6，映射到英文缩写。 */
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function pad(n: number): string {
-  return n.toString().padStart(2, "0");
-}
-
-/** 格式化时区为 UTC 偏移：UTC+8 / UTC-5 / UTC+5:30。 */
-function formatTimezoneOffset(d: Date): string {
-  const offsetMinutes = d.getTimezoneOffset(); // UTC - 本地，中国返回 -480
-  const sign = offsetMinutes <= 0 ? "+" : "-";
-  const abs = Math.abs(offsetMinutes);
-  const hours = Math.floor(abs / 60);
-  const minutes = abs % 60;
-  const mins = minutes > 0 ? `:${pad(minutes)}` : "";
-  return `UTC${sign}${hours}${mins}`;
-}
-
-function formatTimestamp(d: Date): string {
-  const weekday = WEEKDAYS[d.getDay()];
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${weekday} ${pad(d.getHours())}:${pad(d.getMinutes())} ` +
-    formatTimezoneOffset(d)
-  );
-}
-
-/** 把毫秒间隔格式化成紧凑短格式：42s / 5m / 3h15m / 2d5h。 */
-function formatElapsed(ms: number): string {
-  let seconds = Math.max(0, Math.floor(ms / 1000));
-  const days = Math.floor(seconds / 86400);
-  seconds %= 86400;
-  const hours = Math.floor(seconds / 3600);
-  seconds %= 3600;
-  const minutes = Math.floor(seconds / 60);
-  seconds %= 60;
-
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (parts.length === 0) parts.push(`${seconds}s`);
-  return parts.join("");
-}
-
-// ── 时间戳后缀 ──────────────────────────────────────────────────────────
-
-/**
- * 注入到消息末尾的时间戳后缀，两种形状：
- *   首条消息  `[2026-10-16 Fri 12:25 UTC+8]`
- *   后续消息  `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`
- * 旧版 `[Time: … | Since last: …]` 不再生成，也不再剥除。
- */
-const TIMESTAMP_SUFFIX_RE =
-  /\s*\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?(?: \| gap: [^\]\n]+)?\]\s*$/;
-
-/** 剥离文本末尾由本插件注入的时间戳后缀；嵌套多层时一并剥离。 */
-function stripTimestampSuffix(text: string): string {
-  let result = text;
-  for (;;) {
-    const next = result.replace(TIMESTAMP_SUFFIX_RE, "").trimEnd();
-    if (next === result || next.length === 0) return next;
-    result = next;
-  }
-}
-
-/** 组装注入后缀；prev 为 null 表示会话首条消息，此时不写 gap 段。 */
-function buildTimestampSuffix(now: number, prev: number | null): string {
-  const time = formatTimestamp(new Date(now));
-  if (prev === null) return `\n\n[${time}]`;
-  return `\n\n[${time} | gap: ${formatElapsed(now - prev)}]`;
-}
-
-// ── 运行期状态 ──────────────────────────────────────────────────────────
-
-/**
- * 上一条消息的毫秒时间戳。进程内状态，在 session_start 与 /tree 换分支时
- * 从历史消息后缀重新推断（见 inferLastMessageAt），推断不到才为 null。
- */
-let lastMessageAt: number | null = null;
-
-/** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填。 */
-let pendingEditorText: string | null = null;
-
-/** /tree 回填到编辑器的原文（含旧时间戳）；null 表示下一条输入不是回填内容。 */
-let restoredEditorText: string | null = null;
-
-/** 本插件对所有"不注入"分支返回同一个动作。 */
-const SKIP: InputEventResult = { action: "continue" };
-
-// ── /tree 回填 ──────────────────────────────────────────────────────────
-
-/** 把消息 content 转成 pi 回填编辑器时的文本形式：文本块直接拼接。 */
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (block): block is { type: string; text: string } =>
-        typeof block === "object" &&
-        block !== null &&
-        (block as { type?: unknown }).type === "text" &&
-        typeof (block as { text?: unknown }).text === "string",
-    )
-    .map((block) => block.text)
-    .join("");
-}
-
-/** /tree 回填只需区分用户消息与自定义消息，其余类型不参与。 */
-type EditorRestoreEntry =
-  | { type?: string; message?: { role?: string; content?: unknown }; content?: unknown }
-  | undefined;
-
-/**
- * 条目是用户消息时返回其文本内容，否则返回 null。只认 `type: "message"` 且
- * `role: "user"` 的条目——助手消息、工具结果、各类记录条目、以及扩展注入的
- * custom_message 都不是用户输入。
- */
-function entryUserText(entry: EditorRestoreEntry): string | null {
-  if (!entry) return null;
-  if (entry.type !== "message" || entry.message?.role !== "user") return null;
-  return contentToText(entry.message.content);
-}
-
-/** `/tree` 回填的文本来源：用户消息取 `message.content`，自定义消息取 `content`。 */
-function entryRestoreText(entry: EditorRestoreEntry): string | null {
-  if (!entry) return null;
-  if (entry.type === "message" && entry.message?.role === "user") {
-    return contentToText(entry.message.content);
-  }
-  if (entry.type === "custom_message") {
-    return contentToText(entry.content);
-  }
-  return null;
-}
-
-/**
- * /tree 跳转到用户消息时，pi 会把该消息原文回填到输入框（见 navigateTree 的
- * editorText）。原文末尾带旧时间戳，需要在两个环节处理：
  *
- * 1. 回填端（正常路径）：session_tree 早于 pi 写编辑器，这里抢先写入剥净文本，
- *    用户看到的编辑器内容就是干净的。
- * 2. 发送端（兜底）：若回填未被劫持（例如 pi 改了时序），记住回填原文，提交时用
- *    startsWith 定位并替换那一段，用户在其后继续打字也不受影响。
+ * 代码组织：本文件只负责挂 hook 与命令，实现分布在 src/。src/config.ts 的位置
+ * 依赖 `src/` 这一层，移动文件时需同步调整其中定位 config.json 的路径。
  */
-function readRestoredEditorText(
-  sessionManager: { getEntry(id: string): EditorRestoreEntry },
-  targetId: string | null,
-): string | null {
-  if (!targetId) return null;
-  return entryRestoreText(sessionManager.getEntry(targetId));
-}
-
-/**
- * 发送前剥掉回填带来的旧后缀，返回最终待发送文本。
- * 兜底路径下旧后缀不一定在末尾（用户可能在回填文本后继续打字），故按记住的
- * 回填原文前缀定位并只替换那一段；随后再兜底剥一次整条消息末尾的残留后缀
- * （例如直接粘贴了带后缀的旧消息）。
- */
-function stripRestoredSuffixes(rawText: string): string {
-  const restored = restoredEditorText;
-  restoredEditorText = null;
-
-  let text = rawText;
-  if (restored !== null && text.startsWith(restored)) {
-    const strippedRestored = stripTimestampSuffix(restored);
-    if (strippedRestored !== restored) {
-      text = strippedRestored + text.slice(restored.length);
-    }
-  }
-  return stripTimestampSuffix(text);
-}
-
-// ── 历史时间推断 ────────────────────────────────────────────────────────
-
-/**
- * 从消息末尾的后缀 `[2026-11-12 Thu 15:52 UTC+8 | gap: 5m]` 解析出注入时刻
- * （毫秒）。首条消息没有 gap 段，照样解析；旧版 `[Time: …]` 不认。
- * 解析不到返回 null。
- */
-function parseSuffixTimestamp(text: string): number | null {
-  const block = /\n*\[([^\]\n]*)\]\s*$/.exec(text);
-  if (!block) return null;
-  const fields =
-    /^(\d{4})-(\d{2})-(\d{2}) [A-Z][a-z]{2} (\d{2}):(\d{2}) UTC([+-])(\d{1,2})(?::(\d{2}))?/.exec(
-      block[1],
-    );
-  if (!fields) return null;
-
-  const [year, month, day, hour, minute] = fields.slice(1, 6).map(Number);
-  const sign = fields[6] === "+" ? 1 : -1;
-  const offsetMinutes = sign * (Number(fields[7]) * 60 + Number(fields[8] ?? 0));
-  // 后缀里写的是本地时间，减去时区偏移得到 UTC 时刻
-  return Date.UTC(year, month - 1, day, hour, minute) - offsetMinutes * 60_000;
-}
-
-/**
- * 从分支上最近一条用户消息的后缀推断上次注入时刻。恢复会话、重载、/tree 换
- * 分支后进程内状态已失效，用后缀把时间账续上。
- *
- * 只看最近一条用户消息：它的后缀解析不出来（斜杠命令、纯图片、旧格式）就返回
- * null，行为回退到"本次还没有上一条消息"，不再往前找更早的消息。
- */
-function inferLastMessageAt(
-  sessionManager: { getBranch(fromId?: string): EditorRestoreEntry[] },
-  fromId: string | null,
-): number | null {
-  const branch = sessionManager.getBranch(fromId ?? undefined);
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    // assistant / toolResult / 各类记录条目没有用户文本，跳过它们
-    const text = entryUserText(branch[index]);
-    if (text === null) continue;
-    return parseSuffixTimestamp(text);
-  }
-  return null;
-}
-
-// ── 配置 ────────────────────────────────────────────────────────────────
-
-const DEFAULT_THRESHOLD_MINUTES = 5;
-const CONFIG_FILE_NAME = "config.json";
-const USAGE = "usage: /timestamp | /timestamp on | /timestamp off | /timestamp gap <minutes>";
-
-/**
- * 插件自身目录，用于定位同级的 config.json。pi 用 jiti 以 CJS 形式加载扩展、
- * 注入 `__dirname`；若将来改为原生 ESM 加载，则退回 import.meta.url。
- */
-function getExtensionDir(): string {
-  return typeof __dirname === "string" ? __dirname : dirname(fileURLToPath(import.meta.url));
-}
-
-/** config.json 的绝对路径（插件目录下）。 */
-function getConfigPath(): string {
-  return join(getExtensionDir(), CONFIG_FILE_NAME);
-}
-
-/** 读 config.json 原始对象；文件缺失、解析失败或不是对象时返回 null。 */
-function readConfigFile(): Record<string, unknown> | null {
-  const configPath = getConfigPath();
-  if (!existsSync(configPath)) return null;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-/** 文件里的 enabled：是合法布尔值才返回，否则 null（视为未配置）。 */
-function fileEnabled(raw: Record<string, unknown> | null): boolean | null {
-  const value = raw?.enabled;
-  return typeof value === "boolean" ? value : null;
-}
-
-/** 分钟数合法：非负整数（0 表示每条消息都注入）。 */
-function isValidMinutes(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
-
-/** 文件里的 thresholdMinutes：是合法分钟数才返回，否则 null（视为未配置）。 */
-function fileThresholdMinutes(raw: Record<string, unknown> | null): number | null {
-  const value = raw?.thresholdMinutes;
-  return isValidMinutes(value) ? value : null;
-}
-
-/** 把补丁合并进 config.json（保留文件里的其它字段），写入失败返回 false。 */
-function saveConfig(patch: Record<string, unknown>): boolean {
-  const merged = { ...(readConfigFile() ?? {}), ...patch };
-  try {
-    writeFileSync(getConfigPath(), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const initialConfig = readConfigFile();
-
-/** 注入开关：/timestamp on|off，或 config.json 的 enabled 字段。 */
-let enabled = fileEnabled(initialConfig) ?? true;
-
-/** 注入阈值（毫秒）：/timestamp gap <n>，或 config.json 的 thresholdMinutes 字段。 */
-let gapMs = (fileThresholdMinutes(initialConfig) ?? DEFAULT_THRESHOLD_MINUTES) * 60 * 1000;
-
-/** 阈值可读形式：分钟，0 表示每条都注入。 */
-function formatGap(): string {
-  return gapMs === 0 ? "0 (every message)" : `${gapMs / 60000}m`;
-}
-
-/** `/timestamp` 无参数时展示的配置摘要，标注每个值的来源。 */
-function formatConfigSummary(): string {
-  const raw = readConfigFile();
-  const source = (fromFile: boolean) => (fromFile ? CONFIG_FILE_NAME : "default");
-  return [
-    `timestamp: ${enabled ? "on" : "off"}  (${source(fileEnabled(raw) !== null)})`,
-    `gap: ${formatGap()}  (${source(fileThresholdMinutes(raw) !== null)})`,
-  ].join("\n");
-}
-
-// ── /timestamp 命令 ─────────────────────────────────────────────────────
-
-/** 子命令表，同时用于参数补全提示。 */
-const SUBCOMMANDS = [
-  { value: "on", description: "Enable timestamp injection" },
-  { value: "off", description: "Disable timestamp injection" },
-  { value: "gap", description: "Set the threshold in minutes, 0 = every message" },
-] as const;
-
-/** 补全子命令：只补第一段参数，`gap 10` 这类已带参数的后缀不再提示。 */
-function completeSubcommands(
-  argumentPrefix: string,
-): Array<{ value: string; label: string; description: string }> | null {
-  const normalized = argumentPrefix.trim().toLowerCase();
-  if (normalized.includes(" ") || argumentPrefix.endsWith(" ")) return null;
-  const matches = SUBCOMMANDS.filter((item) => item.value.startsWith(normalized)).map((item) => ({
-    value: item.value,
-    label: item.value,
-    description: item.description,
-  }));
-  return matches.length > 0 ? matches : null;
-}
-
-/** 提示设置结果；写入失败时说明只改了内存（本次运行仍生效）。 */
-function notifySaved(ctx: ExtensionCommandContext, message: string, saved: boolean): void {
-  const detail = saved ? message : `${message}\n无法写入 ${CONFIG_FILE_NAME}，仅在本次运行生效`;
-  ctx.ui.notify(detail, saved ? "info" : "warning");
-}
-
-/** `/timestamp` 命令主体：无参数展示配置，其余按子命令处理。 */
-async function runTimestampCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-  const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-
-  if (sub === undefined) {
-    ctx.ui.notify(formatConfigSummary(), "info");
-    return;
-  }
-
-  if ((sub === "on" || sub === "off") && rest.length === 0) {
-    enabled = sub === "on";
-    notifySaved(ctx, `timestamp: ${sub}`, saveConfig({ enabled }));
-    return;
-  }
-
-  if (sub === "gap" && rest.length === 1) {
-    const minutes = Number(rest[0]);
-    if (!isValidMinutes(minutes)) {
-      ctx.ui.notify(`invalid minutes: "${rest[0]}"\n${USAGE}`, "warning");
-      return;
-    }
-    gapMs = minutes * 60 * 1000;
-    notifySaved(ctx, `gap: ${formatGap()}`, saveConfig({ thresholdMinutes: minutes }));
-    return;
-  }
-
-  ctx.ui.notify(USAGE, "warning");
-}
-
-// ── 输入处理 ────────────────────────────────────────────────────────────
-
-/**
- * 斜杠命令不能加后缀：pi 在 input hook 之后才展开 /skill: 与 prompt template，
- * 而 _expandSkillCommand 用 indexOf(" ") 切技能名，后缀里的空格会把技能名切成
- * "foo\n\n[Time:"，查不到技能便原样放行。prompt template 的正则同样会把后缀
- * 当作参数污染 $ARGUMENTS。
- */
-function isSlashCommand(text: string): boolean {
-  return text.trimStart().startsWith("/");
-}
-
-// ── 扩展入口 ────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // 恢复会话（resume/fork）、重载、重启时进程内状态已清空：从当前分支最后
+  // 恢复会话（resume/fork）、重载、重启时进程内状态已清空：从当前分支最近
   // 一条带后缀的用户消息续上时间账；新会话分支为空，自然回退到 null
   pi.on("session_start", async (_event, ctx) => {
-    restoredEditorText = null;
-    pendingEditorText = null;
-    lastMessageAt = inferLastMessageAt(ctx.sessionManager, null);
+    state.restoredEditorText = null;
+    state.pendingEditorText = null;
+    state.lastMessageAt = inferLastMessageAt(ctx.sessionManager, null);
   });
 
   // /tree 跳转：用户在选择器里选中的条目才是回填来源。注意不能从 session_tree
@@ -421,22 +51,22 @@ export default function (pi: ExtensionAPI) {
     const targetId = event.preparation.targetId;
     const restored = readRestoredEditorText(ctx.sessionManager, targetId);
     // 发送端兜底：记住回填原文，提交时据此剥除其中的旧后缀
-    restoredEditorText = restored;
+    state.restoredEditorText = restored;
     // 回填端：pi 稍后会把原文写进编辑器，这里提前算好剥净的版本
-    pendingEditorText = restored === null ? null : stripTimestampSuffix(restored);
+    state.pendingEditorText = restored === null ? null : stripTimestampSuffix(restored);
   });
 
   pi.on("session_tree", async (event, ctx) => {
     // /tree 跳到树内另一分支时，从新分支末条带后缀的用户消息续上时间账
     if (event.newLeafId !== event.oldLeafId) {
-      lastMessageAt = inferLastMessageAt(ctx.sessionManager, event.newLeafId);
+      state.lastMessageAt = inferLastMessageAt(ctx.sessionManager, event.newLeafId);
     }
 
     // pi 只在编辑器为空时把 editorText 回填进输入框（见 interactive-mode 的
     // navigateTree 包装）。这里在回填之前抢先写入剥净文本，pi 随后看到编辑器非空
     // 便跳过自己的回填；编辑器里已有草稿时保持不动，避免覆盖用户输入。
-    const clean = pendingEditorText;
-    pendingEditorText = null;
+    const clean = state.pendingEditorText;
+    state.pendingEditorText = null;
     if (ctx.mode !== "tui" || clean === null || clean.trim() === "") return;
     if (ctx.ui.getEditorText().trim() !== "") return;
     ctx.ui.setEditorText(clean);
@@ -449,21 +79,5 @@ export default function (pi: ExtensionAPI) {
     handler: runTimestampCommand,
   });
 
-  pi.on("input", async (event) => {
-    const text = stripRestoredSuffixes(event.text);
-
-    // 纯图片消息没有文本：不注入，也不推进时间账
-    if (text.trim() === "") return SKIP;
-
-    // 时间账无条件推进，因此关开关、发斜杠命令都不会让下一条消息的间隔失真
-    const now = Date.now();
-    const prev = lastMessageAt;
-    lastMessageAt = now;
-
-    if (!enabled) return SKIP;
-    if (isSlashCommand(text)) return SKIP;
-    if (prev !== null && now - prev < gapMs) return SKIP;
-
-    return { action: "transform", text: text + buildTimestampSuffix(now, prev) };
-  });
+  pi.on("input", async (event) => handleInput(event));
 }
