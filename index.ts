@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /**
@@ -12,7 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * 问答零开销。切换会话（/new、/resume、/fork）或 pi 重启时重置上次
  * 注入时间，因此首条消息显示 start of run。阈值用 config.json 配置：
  *
- *   ~/.pi/agent/extensions/pi-timestamps/config.json
+ *   <插件目录>/config.json（即本文件同级的 config.json）
  *   {
  *     "thresholdMinutes": 5
  *   }
@@ -122,8 +122,15 @@ function readRestoredEditorText(
   return null;
 }
 
-const EXTENSION_ID = "pi-timestamps";
 const DEFAULT_THRESHOLD_MINUTES = 5;
+
+/**
+ * 插件自身目录，用于定位同级的 config.json。pi 用 jiti 以 CJS 形式加载扩展、
+ * 注入 `__dirname`；若将来改为原生 ESM 加载，则退回 import.meta.url。
+ */
+function getExtensionDir(): string {
+  return typeof __dirname === "string" ? __dirname : dirname(fileURLToPath(import.meta.url));
+}
 
 /** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，因此重启后的首条消息会显示 start of run。 */
 let lastMessageAt: number | null = null;
@@ -136,7 +143,7 @@ let restoredEditorText: string | null = null;
 
 /** 读取 config.json 里的阈值（毫秒），无效时回退默认。 */
 function loadThresholdMs(): number {
-  const configPath = join(getAgentDir(), "extensions", EXTENSION_ID, "config.json");
+  const configPath = join(getExtensionDir(), "config.json");
   const fallback = DEFAULT_THRESHOLD_MINUTES * 60 * 1000;
   try {
     if (!existsSync(configPath)) return fallback;
