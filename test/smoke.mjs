@@ -159,11 +159,11 @@ writeConfig('{"enabled":true,"thresholdMinutes":5}');
 }
 
 
-// ── 5. /tree 回填：剥净旧后缀 ───────────────────────────────────────────
-const NEW_SUFFIX = "\n\n[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]";
+// ── 5. /tree 回填：剥净后缀 ───────────────────────────────────────────
+const GAP_SUFFIX = "\n\n[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]";
 const FIRST_SUFFIX = "\n\n[2026-10-16 Fri 12:25 UTC+8]";
-const LEGACY_SUFFIX = "\n\n[Time: 2026-10-16 Fri 12:25 UTC+8 | Since last: 5m]";
-const restoredText = `早期消息${NEW_SUFFIX}`;
+const FOREIGN_SUFFIX = "\n\n[2026-10-16 Fri 12:25]";
+const restoredText = `早期消息${GAP_SUFFIX}`;
 
 writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
@@ -196,7 +196,7 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
     sessionManager: {
       getBranch: () => [],
       getEntry: () =>
-        ({ type: "custom_message", content: `自定义早期消息${NEW_SUFFIX}` }),
+        ({ type: "custom_message", content: `自定义早期消息${GAP_SUFFIX}` }),
     },
     ui: {
       getEditorText: () => "",
@@ -256,26 +256,26 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
   await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
   const sent = await handlers.input({ type: "input", text: `${restoredText}补充一句` });
-  check("兜底剥掉回填带来的旧后缀", sent.text.startsWith("早期消息补充一句\n\n[2026-"), true);
+  check("兜底剥掉回填带来的后缀", sent.text.startsWith("早期消息补充一句\n\n[2026-"), true);
   check("兜底只保留一处时间戳", sent.text.split("\n\n[").length - 1, 1);
 }
 
 {
-  // 直接粘贴带后缀的旧文本
+  // 直接粘贴带后缀的已发消息
   const { handlers } = await loadPlugin();
   handlers.session_start({ reason: "new" }, historyCtx([]));
-  const sent = await handlers.input({ type: "input", text: `粘贴的旧消息${NEW_SUFFIX}` });
-  check("粘贴旧消息时剥掉尾部后缀", sent.text.startsWith("粘贴的旧消息\n\n[2026-"), true);
-  check("粘贴旧消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
+  const sent = await handlers.input({ type: "input", text: `粘贴的已发消息${GAP_SUFFIX}` });
+  check("粘贴已发消息时剥掉尾部后缀", sent.text.startsWith("粘贴的已发消息\n\n[2026-"), true);
+  check("粘贴已发消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
 }
 
 {
-  // 旧版 [Time: …] 后缀按设计不再剥除：保留原文，新后缀另行追加
+  // 认不出的方括号后缀按原样保留，本插件的后缀另行追加
   const { handlers } = await loadPlugin();
   handlers.session_start({ reason: "new" }, historyCtx([]));
-  const sent = await handlers.input({ type: "input", text: `历史消息${LEGACY_SUFFIX}` });
-  check("旧格式后缀保留", sent.text.startsWith("历史消息\n\n[Time: 2026-10-16"), true);
-  check("旧格式正文保留且追加新后缀", sent.text.split("\n\n[").length - 1, 2);
+  const sent = await handlers.input({ type: "input", text: `历史消息${FOREIGN_SUFFIX}` });
+  check("认不出的后缀保留", sent.text.startsWith("历史消息\n\n[2026-10-16 Fri 12:25]"), true);
+  check("认不出的正文保留且追加后缀", sent.text.split("\n\n[").length - 1, 2);
 }
 
 // ── 6. 历史时间推断：从后缀续上时间账 ───────────────────────────────────

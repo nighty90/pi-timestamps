@@ -22,11 +22,7 @@ export type EditorRestoreEntry =
   | { type?: string; message?: { role?: string; content?: unknown }; content?: unknown }
   | undefined;
 
-/**
- * 条目是用户消息时返回其文本内容，否则返回 null。只认 `type: "message"` 且
- * `role: "user"` 的条目——助手消息、工具结果、各类记录条目、以及扩展注入的
- * custom_message 都不是用户输入。
- */
+/** 条目是用户消息时返回其文本，否则 null（只认 type: "message" 与 role: "user"）。 */
 function entryUserText(entry: EditorRestoreEntry): string | null {
   if (!entry) return null;
   if (entry.type !== "message" || entry.message?.role !== "user") return null;
@@ -46,13 +42,8 @@ function entryRestoreText(entry: EditorRestoreEntry): string | null {
 }
 
 /**
- * /tree 跳转到用户消息时，pi 会把该消息原文回填到输入框（见 navigateTree 的
- * editorText）。原文末尾带旧时间戳，需要在两个环节处理：
- *
- * 1. 回填端（正常路径）：session_tree 早于 pi 写编辑器，这里抢先写入剥净文本，
- *    用户看到的编辑器内容就是干净的。
- * 2. 发送端（兜底）：若回填未被劫持（例如 pi 改了时序），记住回填原文，提交时用
- *    startsWith 定位并替换那一段，用户在其后继续打字也不受影响。
+ * 取出 /tree 选中条目在回填时写入编辑器的文本。回填端与发送端都要用它，
+ * 发送端用于定位并剥除回填文本里的后缀。
  */
 export function readRestoredEditorText(
   sessionManager: { getEntry(id: string): EditorRestoreEntry },
@@ -62,12 +53,7 @@ export function readRestoredEditorText(
   return entryRestoreText(sessionManager.getEntry(targetId));
 }
 
-/**
- * 发送前剥掉回填带来的旧后缀，返回最终待发送文本。
- * 兜底路径下旧后缀不一定在末尾（用户可能在回填文本后继续打字），故按记住的
- * 回填原文前缀定位并只替换那一段；随后再兜底剥一次整条消息末尾的残留后缀
- * （例如直接粘贴了带后缀的旧消息）。
- */
+/** 剥除回填文本带来的后缀：先按回填原文前缀替换，再兜底剥一次末尾残留。 */
 export function stripRestoredSuffixes(rawText: string): string {
   const restored = state.restoredEditorText;
   state.restoredEditorText = null;
@@ -83,11 +69,8 @@ export function stripRestoredSuffixes(rawText: string): string {
 }
 
 /**
- * 从分支上最近一条用户消息的后缀推断上次注入时刻。恢复会话、重载、/tree 换
- * 分支后进程内状态已失效，用后缀把时间账续上。
- *
- * 只看最近一条用户消息：它的后缀解析不出来（斜杠命令、纯图片、旧格式）就返回
- * null，行为回退到"本次还没有上一条消息"，不再往前找更早的消息。
+ * 从分支上最近一条用户消息的后缀推断上次注入时刻；解析不出来返回 null，
+ * 不往前找更早的消息。
  */
 export function inferLastMessageAt(
   sessionManager: { getBranch(fromId?: string): EditorRestoreEntry[] },

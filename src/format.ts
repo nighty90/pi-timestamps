@@ -47,12 +47,7 @@ export function formatElapsed(ms: number): string {
 
 // ── 时间戳后缀 ──────────────────────────────────────────────────────────
 
-/**
- * 注入到消息末尾的时间戳后缀，两种形状：
- *   首条消息  `[2026-10-16 Fri 12:25 UTC+8]`
- *   后续消息  `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`
- * 旧版 `[Time: … | Since last: …]` 不再生成，也不再剥除。
- */
+/** 时间戳后缀：首条 `[时间]`，后续 `[时间 | gap: 5m]`。 */
 const TIMESTAMP_SUFFIX_RE =
   /\s*\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?(?: \| gap: [^\]\n]+)?\]\s*$/;
 
@@ -73,11 +68,7 @@ export function buildTimestampSuffix(now: number, prev: number | null): string {
   return `\n\n[${time} | gap: ${formatElapsed(now - prev)}]`;
 }
 
-/**
- * 从消息末尾的后缀 `[2026-11-12 Thu 15:52 UTC+8 | gap: 5m]` 解析出注入时刻
- * （毫秒）。首条消息没有 gap 段，照样解析；旧版 `[Time: …]` 不认。
- * 解析不到返回 null。
- */
+/** 从后缀解析出注入时刻（毫秒），解析不到返回 null。 */
 export function parseSuffixTimestamp(text: string): number | null {
   const block = /\n*\[([^\]\n]*)\]\s*$/.exec(text);
   if (!block) return null;

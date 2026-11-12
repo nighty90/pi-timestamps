@@ -7,10 +7,7 @@ const DEFAULT_THRESHOLD_MINUTES = 5;
 const CONFIG_FILE_NAME = "config.json";
 const USAGE = "usage: /timestamp | /timestamp on | /timestamp off | /timestamp gap <minutes>";
 
-/**
- * 包根目录（放 config.json 的地方）。本文件位于 `<包根>/src/`，所以从自身文件
- * URL 上溯两级，与 index.ts 的位置无关。
- */
+/** 包根目录：本文件在 `<包根>/src/`，从自身文件 URL 上溯两级。 */
 function getPackageDir(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
@@ -61,10 +58,7 @@ function saveConfig(patch: Record<string, unknown>): boolean {
   }
 }
 
-/**
- * 生效中的配置。模块级可变绑定无法被其他模块改写，故集中成一个对象；修改走
- * `/timestamp` 命令，读取方直接用 `settings.enabled` / `settings.gapMs`。
- */
+/** 生效中的配置；模块级 `let` 无法被其他模块改写，故集中成一个对象。 */
 export const settings: {
   /** 注入开关：/timestamp on|off，或 config.json 的 enabled 字段。 */
   enabled: boolean;

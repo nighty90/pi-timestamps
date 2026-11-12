@@ -5,10 +5,8 @@ import { SKIP, state } from "./state.ts";
 import { stripRestoredSuffixes } from "./tree.ts";
 
 /**
- * 斜杠命令不能加后缀：pi 在 input hook 之后才展开 /skill: 与 prompt template，
- * 而 _expandSkillCommand 用 indexOf(" ") 切技能名，后缀里的空格会把技能名切成
- * "foo\n\n[Time:"，查不到技能便原样放行。prompt template 的正则同样会把后缀
- * 当作参数污染 $ARGUMENTS。
+ * 斜杠命令不加后缀：pi 在 input hook 之后才展开技能与模板，后缀会污染
+ * 技能名和 $ARGUMENTS。
  */
 function isSlashCommand(text: string): boolean {
   return text.trimStart().startsWith("/");
