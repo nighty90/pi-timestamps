@@ -1,7 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, InputEventResult } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  InputEventResult,
+} from "@earendil-works/pi-coding-agent";
 
 /**
  * 给用户消息自动加上当前时间戳，让模型感知每条消息的时间。
@@ -10,14 +14,18 @@ import type { ExtensionAPI, InputEventResult } from "@earendil-works/pi-coding-a
  *
  * 只在距上一条消息超过阈值时才注入（感知跨时段长会话），连续快速
  * 问答零开销。切换会话（/new、/resume、/fork）或 pi 重启时重置上次
- * 注入时间，因此首条消息显示 start of run。阈值用 config.json 配置：
+ * 注入时间，因此首条消息显示 start of run。
+ *
+ * 开关与阈值用 `/timestamp` 命令查看和修改，设置写入同目录的 config.json
+ * 并立即生效（无需 /reload）；也可手工编辑该文件：
  *
  *   <插件目录>/config.json（即本文件同级的 config.json）
  *   {
+ *     "enabled": true,
  *     "thresholdMinutes": 5
  *   }
  *
- * 配置缺失或字段无效时回退到默认值。
+ * 配置缺失或字段无效时回退到默认值（enabled: true、thresholdMinutes: 5）。
  */
 
 // ── 时间格式化 ──────────────────────────────────────────────────────────
@@ -175,6 +183,7 @@ function stripRestoredSuffixes(rawText: string): string {
 
 const DEFAULT_THRESHOLD_MINUTES = 5;
 const CONFIG_FILE_NAME = "config.json";
+const USAGE = "usage: /timestamp | /timestamp on | /timestamp off | /timestamp gap <minutes>";
 
 /**
  * 插件自身目录，用于定位同级的 config.json。pi 用 jiti 以 CJS 形式加载扩展、
@@ -202,7 +211,13 @@ function readConfigFile(): Record<string, unknown> | null {
   }
 }
 
-/** 分钟数合法：非负整数。 */
+/** 文件里的 enabled：是合法布尔值才返回，否则 null（视为未配置）。 */
+function fileEnabled(raw: Record<string, unknown> | null): boolean | null {
+  const value = raw?.enabled;
+  return typeof value === "boolean" ? value : null;
+}
+
+/** 分钟数合法：非负整数（0 表示每条消息都注入）。 */
 function isValidMinutes(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
@@ -213,13 +228,97 @@ function fileThresholdMinutes(raw: Record<string, unknown> | null): number | nul
   return isValidMinutes(value) ? value : null;
 }
 
-/** 读取 config.json 里的阈值（毫秒），无效时回退默认。 */
-function loadThresholdMs(): number {
-  const minutes = fileThresholdMinutes(readConfigFile());
-  return (minutes ?? DEFAULT_THRESHOLD_MINUTES) * 60 * 1000;
+/** 把补丁合并进 config.json（保留文件里的其它字段），写入失败返回 false。 */
+function saveConfig(patch: Record<string, unknown>): boolean {
+  const merged = { ...(readConfigFile() ?? {}), ...patch };
+  try {
+    writeFileSync(getConfigPath(), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-const THRESHOLD_MS = loadThresholdMs();
+const initialConfig = readConfigFile();
+
+/** 注入开关：/timestamp on|off，或 config.json 的 enabled 字段。 */
+let enabled = fileEnabled(initialConfig) ?? true;
+
+/** 注入阈值（毫秒）：/timestamp gap <n>，或 config.json 的 thresholdMinutes 字段。 */
+let gapMs = (fileThresholdMinutes(initialConfig) ?? DEFAULT_THRESHOLD_MINUTES) * 60 * 1000;
+
+/** 阈值可读形式：分钟，0 表示每条都注入。 */
+function formatGap(): string {
+  return gapMs === 0 ? "0 (every message)" : `${gapMs / 60000}m`;
+}
+
+/** `/timestamp` 无参数时展示的配置摘要，标注每个值的来源。 */
+function formatConfigSummary(): string {
+  const raw = readConfigFile();
+  const source = (fromFile: boolean) => (fromFile ? CONFIG_FILE_NAME : "default");
+  return [
+    `timestamp: ${enabled ? "on" : "off"}  (${source(fileEnabled(raw) !== null)})`,
+    `gap: ${formatGap()}  (${source(fileThresholdMinutes(raw) !== null)})`,
+  ].join("\n");
+}
+
+// ── /timestamp 命令 ─────────────────────────────────────────────────────
+
+/** 子命令表，同时用于参数补全提示。 */
+const SUBCOMMANDS = [
+  { value: "on", description: "Enable timestamp injection" },
+  { value: "off", description: "Disable timestamp injection" },
+  { value: "gap", description: "Set the threshold in minutes, 0 = every message" },
+] as const;
+
+/** 补全子命令：只补第一段参数，`gap 10` 这类已带参数的后缀不再提示。 */
+function completeSubcommands(
+  argumentPrefix: string,
+): Array<{ value: string; label: string; description: string }> | null {
+  const normalized = argumentPrefix.trim().toLowerCase();
+  if (normalized.includes(" ") || argumentPrefix.endsWith(" ")) return null;
+  const matches = SUBCOMMANDS.filter((item) => item.value.startsWith(normalized)).map((item) => ({
+    value: item.value,
+    label: item.value,
+    description: item.description,
+  }));
+  return matches.length > 0 ? matches : null;
+}
+
+/** 提示设置结果；写入失败时说明只改了内存（本次运行仍生效）。 */
+function notifySaved(ctx: ExtensionCommandContext, message: string, saved: boolean): void {
+  const detail = saved ? message : `${message}\n无法写入 ${CONFIG_FILE_NAME}，仅在本次运行生效`;
+  ctx.ui.notify(detail, saved ? "info" : "warning");
+}
+
+/** `/timestamp` 命令主体：无参数展示配置，其余按子命令处理。 */
+async function runTimestampCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+  if (sub === undefined) {
+    ctx.ui.notify(formatConfigSummary(), "info");
+    return;
+  }
+
+  if ((sub === "on" || sub === "off") && rest.length === 0) {
+    enabled = sub === "on";
+    notifySaved(ctx, `timestamp: ${sub}`, saveConfig({ enabled }));
+    return;
+  }
+
+  if (sub === "gap" && rest.length === 1) {
+    const minutes = Number(rest[0]);
+    if (!isValidMinutes(minutes)) {
+      ctx.ui.notify(`invalid minutes: "${rest[0]}"\n${USAGE}`, "warning");
+      return;
+    }
+    gapMs = minutes * 60 * 1000;
+    notifySaved(ctx, `gap: ${formatGap()}`, saveConfig({ thresholdMinutes: minutes }));
+    return;
+  }
+
+  ctx.ui.notify(USAGE, "warning");
+}
 
 // ── 输入处理 ────────────────────────────────────────────────────────────
 
@@ -273,19 +372,27 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setEditorText(clean);
   });
 
+  // 配置命令：查看开关与阈值，修改后写入 config.json 并立即生效
+  pi.registerCommand("timestamp", {
+    description: "Show or change timestamp injection settings",
+    getArgumentCompletions: completeSubcommands,
+    handler: runTimestampCommand,
+  });
+
   pi.on("input", async (event) => {
     const text = stripRestoredSuffixes(event.text);
 
     // 纯图片消息没有文本：不注入，也不推进时间账
     if (text.trim() === "") return SKIP;
 
-    // 时间账无条件推进，因此发斜杠命令不会让下一条消息的间隔失真
+    // 时间账无条件推进，因此关开关、发斜杠命令都不会让下一条消息的间隔失真
     const now = Date.now();
     const prev = lastMessageAt;
     lastMessageAt = now;
 
+    if (!enabled) return SKIP;
     if (isSlashCommand(text)) return SKIP;
-    if (prev !== null && now - prev < THRESHOLD_MS) return SKIP;
+    if (prev !== null && now - prev < gapMs) return SKIP;
 
     return { action: "transform", text: text + buildTimestampSuffix(now, prev) };
   });

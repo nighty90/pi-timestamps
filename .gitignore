@@ -54,6 +54,10 @@ lerna-debug.log*
 # 本地运行配置（每台机器不同，默认值写在 index.ts 的 DEFAULT_THRESHOLD_MINUTES）
 config.json
 
+# 测试生成物（smoke.mjs 会把 index.ts 复制到 test/ 下加载，配置也随之落在 test/）
+test/config.json
+test/.sandbox-index.ts
+
 # node (local)
 # Dependencies
 node_modules/
