@@ -111,8 +111,16 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   handlers.session_start({ reason: "new" });
   const first = await handlers.input({ type: "input", text: "第一条" });
   check("gap 0 首条为 transform", first.action, "transform");
-  check("首条 Since last 为 start of run", first.text.includes("Since last: start of run"), true);
-  check("gap 0 时每条都注入", (await handlers.input({ type: "input", text: "第二条" })).action, "transform");
+  check(
+    "首条只有时间、没有 gap 段",
+    /^第一条\n\n\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?\]$/.test(
+      first.text,
+    ),
+    true,
+  );
+  const second = await handlers.input({ type: "input", text: "第二条" });
+  check("gap 0 时每条都注入", second.action, "transform");
+  check("后续消息带 gap 段", /\| gap: 0s\]$/.test(second.text), true);
 }
 
 writeConfig('{"enabled":true,"thresholdMinutes":5}');
@@ -143,8 +151,10 @@ writeConfig('{"enabled":true,"thresholdMinutes":5}');
 
 
 // ── 5. /tree 回填：剥净旧后缀 ───────────────────────────────────────────
-const OLD_SUFFIX = "\n\n[Time: 2026-10-16 Fri 12:25 UTC+8 | Since last: 5m]";
-const restoredText = `早期消息${OLD_SUFFIX}`;
+const NEW_SUFFIX = "\n\n[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]";
+const FIRST_SUFFIX = "\n\n[2026-10-16 Fri 12:25 UTC+8]";
+const LEGACY_SUFFIX = "\n\n[Time: 2026-10-16 Fri 12:25 UTC+8 | Since last: 5m]";
+const restoredText = `早期消息${NEW_SUFFIX}`;
 
 writeConfig('{"enabled":true,"thresholdMinutes":0}');
 {
@@ -152,7 +162,10 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   const editor = { text: "", writes: [] };
   const ctx = {
     mode: "tui",
-    sessionManager: { getEntry: (id) => (id === "u1" ? { type: "message", message: { role: "user", content: restoredText } } : undefined) },
+    sessionManager: {
+      getEntry: (id) =>
+        id === "u1" ? { type: "message", message: { role: "user", content: restoredText } } : undefined,
+    },
     ui: {
       getEditorText: () => editor.text,
       setEditorText: (value) => {
@@ -176,27 +189,61 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
 }
 
 {
+  // 会话首条消息的后缀（只有时间，无 gap 段）同样要剥掉
+  const { handlers } = await loadPlugin();
+  const editor = { text: "", writes: [] };
+  const ctx = {
+    mode: "tui",
+    sessionManager: {
+      getEntry: () =>
+        ({ type: "message", message: { role: "user", content: `首条消息${FIRST_SUFFIX}` } }),
+    },
+    ui: {
+      getEditorText: () => editor.text,
+      setEditorText: (value) => {
+        editor.text = value;
+        editor.writes.push(value);
+      },
+    },
+  };
+  await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
+  await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
+  check("首条消息的无 gap 后缀也剥掉", editor.writes, ["首条消息"]);
+}
+
+{
   // 发送端兜底：回填未被劫持时，用户在回填文本后继续打字
   const { handlers } = await loadPlugin();
   const ctx = {
     mode: "plain",
-    sessionManager: { getEntry: () => ({ type: "message", message: { role: "user", content: restoredText } }) },
+    sessionManager: {
+      getEntry: () => ({ type: "message", message: { role: "user", content: restoredText } }),
+    },
     ui: { getEditorText: () => "", setEditorText: () => {} },
   };
   await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
   await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
   const sent = await handlers.input({ type: "input", text: `${restoredText}补充一句` });
-  check("兜底剥掉回填带来的旧后缀", sent.text.startsWith("早期消息补充一句\n\n[Time: "), true);
-  check("兜底只保留一处时间戳", sent.text.split("[Time: ").length - 1, 1);
+  check("兜底剥掉回填带来的旧后缀", sent.text.startsWith("早期消息补充一句\n\n[2026-"), true);
+  check("兜底只保留一处时间戳", sent.text.split("\n\n[").length - 1, 1);
 }
 
 {
   // 直接粘贴带后缀的旧文本
   const { handlers } = await loadPlugin();
   handlers.session_start({ reason: "new" });
-  const sent = await handlers.input({ type: "input", text: `粘贴的旧消息${OLD_SUFFIX}` });
-  check("粘贴旧消息时剥掉尾部后缀", sent.text.startsWith("粘贴的旧消息\n\n[Time: "), true);
-  check("粘贴旧消息后时间戳不重复", sent.text.split("[Time: ").length - 1, 1);
+  const sent = await handlers.input({ type: "input", text: `粘贴的旧消息${NEW_SUFFIX}` });
+  check("粘贴旧消息时剥掉尾部后缀", sent.text.startsWith("粘贴的旧消息\n\n[2026-"), true);
+  check("粘贴旧消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
+}
+
+{
+  // 旧版 [Time: …] 后缀按设计不再剥除：保留原文，新后缀另行追加
+  const { handlers } = await loadPlugin();
+  handlers.session_start({ reason: "new" });
+  const sent = await handlers.input({ type: "input", text: `历史消息${LEGACY_SUFFIX}` });
+  check("旧格式后缀保留", sent.text.startsWith("历史消息\n\n[Time: 2026-10-16"), true);
+  check("旧格式正文保留且追加新后缀", sent.text.split("\n\n[").length - 1, 2);
 }
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

@@ -14,7 +14,8 @@ import type {
  *
  * 只在距上一条消息超过阈值时才注入（感知跨时段长会话），连续快速
  * 问答零开销。切换会话（/new、/resume、/fork）或 pi 重启时重置上次
- * 注入时间，因此首条消息显示 start of run。
+ * 注入时间。后缀形如 `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`，gap 是距
+ * 上一条消息的间隔；会话首条消息没有上一条，只写时间部分。
  *
  * 开关与阈值用 `/timestamp` 命令查看和修改，设置写入同目录的 config.json
  * 并立即生效（无需 /reload）；也可手工编辑该文件：
@@ -77,9 +78,14 @@ function formatElapsed(ms: number): string {
 
 // ── 时间戳后缀 ──────────────────────────────────────────────────────────
 
-/** 注入到消息末尾的时间戳后缀，形如
- * `[Time: 2026-10-16 Fri 12:25 UTC+8 | Since last: 5m]`。 */
-const TIMESTAMP_SUFFIX_RE = /\s*\[Time: [^\]\n]*\]\s*$/;
+/**
+ * 注入到消息末尾的时间戳后缀，两种形状：
+ *   首条消息  `[2026-10-16 Fri 12:25 UTC+8]`
+ *   后续消息  `[2026-10-16 Fri 12:25 UTC+8 | gap: 5m]`
+ * 旧版 `[Time: … | Since last: …]` 不再生成，也不再剥除。
+ */
+const TIMESTAMP_SUFFIX_RE =
+  /\s*\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?(?: \| gap: [^\]\n]+)?\]\s*$/;
 
 /** 剥离文本末尾由本插件注入的时间戳后缀；嵌套多层时一并剥离。 */
 function stripTimestampSuffix(text: string): string {
@@ -91,15 +97,16 @@ function stripTimestampSuffix(text: string): string {
   }
 }
 
-/** 组装注入后缀；prev 为 null 表示本次会话还没有上一条消息。 */
+/** 组装注入后缀；prev 为 null 表示会话首条消息，此时不写 gap 段。 */
 function buildTimestampSuffix(now: number, prev: number | null): string {
-  const sinceLast = prev === null ? "start of run" : formatElapsed(now - prev);
-  return `\n\n[Time: ${formatTimestamp(new Date(now))} | Since last: ${sinceLast}]`;
+  const time = formatTimestamp(new Date(now));
+  if (prev === null) return `\n\n[${time}]`;
+  return `\n\n[${time} | gap: ${formatElapsed(now - prev)}]`;
 }
 
 // ── 运行期状态 ──────────────────────────────────────────────────────────
 
-/** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，因此重启后的首条消息会显示 start of run。 */
+/** 上一条消息的毫秒时间戳；进程内状态，pi 重启后重置为 null，重启后的首条消息因此不带 gap 段。 */
 let lastMessageAt: number | null = null;
 
 /** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填。 */
