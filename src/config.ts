@@ -144,7 +144,8 @@ export async function runTimestampCommand(
   }
 
   if (sub === "gap" && rest.length === 1) {
-    const minutes = Number(rest[0]);
+    // 只认十进制整数：Number("0x10") 之类会被它自己解释成别的值
+    const minutes = /^\d+$/.test(rest[0]) ? Number(rest[0]) : NaN;
     if (!isValidMinutes(minutes)) {
       ctx.ui.notify(`invalid minutes: "${rest[0]}"\n${USAGE}`, "warning");
       return;

@@ -137,6 +137,8 @@ writeConfig(null);
   check("gap 无参数报用法", (await runCommand("gap"))[0], "warning");
   check("gap 负数报错", (await runCommand("gap -1"))[1].startsWith('invalid minutes: "-1"'), true);
   check("gap 小数报错", (await runCommand("gap 2.5"))[1].startsWith('invalid minutes: "2.5"'), true);
+  check("gap 十六进制报错", (await runCommand("gap 0x10"))[1].startsWith('invalid minutes: "0x10"'), true);
+  check("gap 指数写法报错", (await runCommand("gap 1e3"))[1].startsWith('invalid minutes: "1e3"'), true);
   check("未知子命令报用法", (await runCommand("foo"))[0], "warning");
   check("多余参数报用法", (await runCommand("on extra"))[0], "warning");
 }
