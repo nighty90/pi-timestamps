@@ -12,6 +12,7 @@ function formatTimezoneOffset(d: Date): string {
   const offsetMinutes = d.getTimezoneOffset(); // UTC - 本地，中国返回 -480
   const sign = offsetMinutes <= 0 ? "+" : "-";
   const abs = Math.abs(offsetMinutes);
+  // 偏移以分钟为单位，拆成时与分
   const hours = Math.floor(abs / 60);
   const minutes = abs % 60;
   const mins = minutes > 0 ? `:${pad(minutes)}` : "";
@@ -29,6 +30,7 @@ function formatTimestamp(d: Date): string {
 
 /** 把毫秒间隔格式化成紧凑短格式：42s / 5m / 3h15m / 2d5h。 */
 export function formatElapsed(ms: number): string {
+  // 以下按秒分解：天 / 时 / 分 / 秒，数值取自常规进位
   let seconds = Math.max(0, Math.floor(ms / 1000));
   const days = Math.floor(seconds / 86400);
   seconds %= 86400;
@@ -47,9 +49,21 @@ export function formatElapsed(ms: number): string {
 
 // ── 时间戳后缀 ──────────────────────────────────────────────────────────
 
-/** 时间戳后缀：首条 `[时间]`，后续 `[时间 | gap: 5m]`。 */
-const TIMESTAMP_SUFFIX_RE =
-  /\s*\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?(?: \| gap: [^\]\n]+)?\]\s*$/;
+const SUFFIX_SEPARATOR = "\n\n";
+const GAP_LABEL = "gap: ";
+
+/** 把字面量安全嵌进正则（当前只有 `GAP_LABEL` 用到） */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 时间戳后缀：首条 `[时间]`，后续 `[时间 | gap: 5m]`。
+ * 日期、星期与时区偏移的形状只写在这里，组装侧见 `buildTimestampSuffix`。
+ */
+const TIMESTAMP_SUFFIX_RE = new RegExp(
+  String.raw`\s*\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2} UTC[+-]\d{1,2}(?::\d{2})?(?: \| ${escapeRegExp(GAP_LABEL)}[^\]\n]+)?\]\s*$`,
+);
 
 /** 剥离文本末尾由本插件注入的时间戳后缀；嵌套多层时一并剥离。 */
 export function stripTimestampSuffix(text: string): string {
@@ -64,7 +78,7 @@ export function stripTimestampSuffix(text: string): string {
 /** 组装注入后缀；prev 为 null 表示会话首条消息，此时不写 gap 段。 */
 export function buildTimestampSuffix(now: number, prev: number | null): string {
   const time = formatTimestamp(new Date(now));
-  if (prev === null) return `\n\n[${time}]`;
-  return `\n\n[${time} | gap: ${formatElapsed(now - prev)}]`;
+  if (prev === null) return `${SUFFIX_SEPARATOR}[${time}]`;
+  return `${SUFFIX_SEPARATOR}[${time} | ${GAP_LABEL}${formatElapsed(now - prev)}]`;
 }
 

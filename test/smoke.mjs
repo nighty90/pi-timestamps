@@ -63,7 +63,8 @@ async function loadPlugin() {
       commands[name] = options;
     },
   });
-  return { handlers, commands };
+  const format = await jiti.import(join(sandboxDir, "src/format.ts"));
+  return { handlers, commands, format };
 }
 
 const noted = [];
@@ -320,6 +321,21 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   const sent = await send(handlers, makeSession(), `历史消息${FOREIGN_SUFFIX}`);
   check("认不出的后缀保留", sent.text.startsWith("历史消息\n\n[2026-10-16 Fri 12:25]"), true);
   check("认不出的正文保留且追加后缀", sent.text.split("\n\n[").length - 1, 2);
+}
+
+{
+  // 组装与识别必须成对：这里用真实的 buildTimestampSuffix 产物喂给剥离逻辑
+  const { format } = await loadPlugin();
+  const now = Date.UTC(2026, 9, 16, 4, 25);
+  const withGap = `正文${format.buildTimestampSuffix(now, now - 5 * 60_000)}`;
+  const firstOnly = `正文${format.buildTimestampSuffix(now, null)}`;
+  check("组装出的带 gap 后缀能被剥净", format.stripTimestampSuffix(withGap), "正文");
+  check("组装出的首条后缀能被剥净", format.stripTimestampSuffix(firstOnly), "正文");
+  check(
+    "嵌套两层后缀一并剥净",
+    format.stripTimestampSuffix(`${firstOnly}${format.buildTimestampSuffix(now, now - 60_000)}`),
+    "正文",
+  );
 }
 
 // ── 6. 上一条消息时间：读会话条目的 timestamp ───────────────────────────

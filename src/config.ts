@@ -4,8 +4,10 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_THRESHOLD_MINUTES = 5;
+const MS_PER_MINUTE = 60_000;
 const CONFIG_FILE_NAME = "config.json";
 const EXTENSION_ID = "pi-timestamps";
+const EVERY_MESSAGE_LABEL = "every message";
 const USAGE = "usage: /timestamp | /timestamp on | /timestamp off | /timestamp gap <minutes>";
 
 /** config.json 的绝对路径：`<agent 目录>/extensions/pi-timestamps/config.json`。 */
@@ -76,13 +78,13 @@ export const settings: {
   const raw = readConfigFile();
   return {
     enabled: fileEnabled(raw) ?? true,
-    gapMs: (fileThresholdMinutes(raw) ?? DEFAULT_THRESHOLD_MINUTES) * 60 * 1000,
+    gapMs: (fileThresholdMinutes(raw) ?? DEFAULT_THRESHOLD_MINUTES) * MS_PER_MINUTE,
   };
 })();
 
 /** 阈值可读形式：分钟，0 表示每条都注入。 */
 export function formatGap(): string {
-  return settings.gapMs === 0 ? "0 (every message)" : `${settings.gapMs / 60000}m`;
+  return settings.gapMs === 0 ? `0 (${EVERY_MESSAGE_LABEL})` : `${settings.gapMs / MS_PER_MINUTE}m`;
 }
 
 /** `/timestamp` 无参数时展示的配置摘要，标注每个值的来源。 */
@@ -100,7 +102,7 @@ export function formatConfigSummary(): string {
 const SUBCOMMANDS = [
   { value: "on", description: "Enable timestamp injection" },
   { value: "off", description: "Disable timestamp injection" },
-  { value: "gap", description: "Set the threshold in minutes, 0 = every message" },
+  { value: "gap", description: `Set the threshold in minutes, 0 = ${EVERY_MESSAGE_LABEL}` },
 ] as const;
 
 /** 补全子命令：只补第一段参数，`gap 10` 这类已带参数的后缀不再提示。 */
@@ -147,7 +149,7 @@ export async function runTimestampCommand(
       ctx.ui.notify(`invalid minutes: "${rest[0]}"\n${USAGE}`, "warning");
       return;
     }
-    settings.gapMs = minutes * 60 * 1000;
+    settings.gapMs = minutes * MS_PER_MINUTE;
     notifySaved(ctx, `gap: ${formatGap()}`, saveConfig({ thresholdMinutes: minutes }));
     return;
   }
