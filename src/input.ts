@@ -5,8 +5,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { buildTimestampSuffix } from "./format.ts";
 import { settings } from "./config.ts";
-import { SKIP } from "./state.ts";
 import { lastUserMessageAt } from "./tree.ts";
+/** 本插件对所有"不注入"分支返回同一个动作。 */
+const SKIP: InputEventResult = { action: "continue" };
 
 /**
  * 斜杠命令不加后缀：pi 在 input hook 之后才展开技能与模板，后缀会污染

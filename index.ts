@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { completeSubcommands, runTimestampCommand } from "./src/config.ts";
 import { handleInput } from "./src/input.ts";
-import { state } from "./src/state.ts";
 import { readRestoredEditorText } from "./src/tree.ts";
 import { stripTimestampSuffix } from "./src/format.ts";
 
@@ -12,18 +11,21 @@ import { stripTimestampSuffix } from "./src/format.ts";
  */
 
 export default function (pi: ExtensionAPI) {
+  /** /tree 回填时 pi 即将写入编辑器的文本，已剥净时间戳；null 表示本次跳转不回填 */
+  let pendingEditorText: string | null = null;
+
   // 选中条目只在 preparation.targetId 里，session_tree 的 newLeafId 会落到它的 parent
   pi.on("session_before_tree", async (event, ctx) => {
     const targetId = event.preparation.targetId;
     const restored = readRestoredEditorText(ctx.sessionManager, targetId);
     // pi 稍后会把原文写进编辑器，这里提前算好剥净的版本
-    state.pendingEditorText = restored === null ? null : stripTimestampSuffix(restored);
+    pendingEditorText = restored === null ? null : stripTimestampSuffix(restored);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     // pi 只在编辑器为空时回填：抢先写入剥净文本，已有草稿则保持不动
-    const clean = state.pendingEditorText;
-    state.pendingEditorText = null;
+    const clean = pendingEditorText;
+    pendingEditorText = null;
     if (ctx.mode !== "tui" || clean === null || clean.trim() === "") return;
     if (ctx.ui.getEditorText().trim() !== "") return;
     ctx.ui.setEditorText(clean);
