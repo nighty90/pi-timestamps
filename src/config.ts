@@ -100,20 +100,26 @@ export function formatConfigSummary(): string {
 
 /** 子命令表，同时用于参数补全提示。 */
 const SUBCOMMANDS = [
-  { value: "on", description: "Enable timestamp injection" },
-  { value: "off", description: "Disable timestamp injection" },
-  { value: "gap", description: `Set the threshold in minutes, 0 = ${EVERY_MESSAGE_LABEL}` },
+  { value: "on", label: "on", description: "Enable timestamp injection" },
+  { value: "off", label: "off", description: "Disable timestamp injection" },
+  {
+    value: "gap ",
+    label: "gap",
+    description: `Set the threshold in minutes, 0 = ${EVERY_MESSAGE_LABEL}`,
+  },
 ] as const;
 
 /** 补全子命令：只补第一段参数，`gap 10` 这类已带参数的后缀不再提示。 */
 export function completeSubcommands(
   argumentPrefix: string,
 ): Array<{ value: string; label: string; description: string }> | null {
-  const normalized = argumentPrefix.trim().toLowerCase();
-  if (normalized.includes(" ") || argumentPrefix.endsWith(" ")) return null;
-  const matches = SUBCOMMANDS.filter((item) => item.value.startsWith(normalized)).map((item) => ({
+  // 只补第一段参数：`/timestamp gap ` 已在写第二个参数，不再给候选
+  const [head = "", ...rest] = argumentPrefix.trimStart().split(/\s+/);
+  if (rest.length > 0) return null;
+  const normalized = head.toLowerCase();
+  const matches = SUBCOMMANDS.filter((item) => item.label.startsWith(normalized)).map((item) => ({
     value: item.value,
-    label: item.value,
+    label: item.label,
     description: item.description,
   }));
   return matches.length > 0 ? matches : null;

@@ -226,9 +226,11 @@ writeConfig('{"enabled":true,"thresholdMinutes":5}');
 {
   const { commands } = await loadPlugin();
   const complete = commands.timestamp.getArgumentCompletions;
-  check("补全空前缀", complete("").map((item) => item.value), ["on", "off", "gap"]);
-  check("补全 g", complete("g").map((item) => item.value), ["gap"]);
+  check("补全空前缀", complete("").map((item) => item.value), ["on", "off", "gap "]);
+  check("补全 g", complete("g").map((item) => item.value), ["gap "]);
+  check("补全标签不带尾随空格", complete("g").map((item) => item.label), ["gap"]);
   check("补全已有参数时不再提示", complete("gap "), null);
+  check("补全多余的空白仍给候选", complete(" ").map((item) => item.value), ["on", "off", "gap "]);
   check("补全无匹配", complete("x"), null);
 }
 
