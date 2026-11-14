@@ -313,31 +313,6 @@ writeConfig('{"enabled":true,"thresholdMinutes":0}');
   check("首条消息的无 gap 后缀也剥掉", editor.writes, ["首条消息"]);
 }
 
-{
-  // 发送端兜底：回填未被劫持时，用户在回填文本后继续打字
-  const { handlers } = await loadPlugin();
-  const ctx = {
-    mode: "plain",
-    sessionManager: {
-      getBranch: () => [],
-      getEntry: () => ({ type: "message", message: { role: "user", content: restoredText } }),
-    },
-    ui: { getEditorText: () => "", setEditorText: () => {} },
-  };
-  await handlers.session_before_tree({ preparation: { targetId: "u1" } }, ctx);
-  await handlers.session_tree({ newLeafId: "u1", oldLeafId: "x" }, ctx);
-  const sent = await send(handlers, makeSession(), `${restoredText}补充一句`);
-  check("兜底剥掉回填带来的后缀", sent.text.startsWith("早期消息补充一句\n\n[2026-"), true);
-  check("兜底只保留一处时间戳", sent.text.split("\n\n[").length - 1, 1);
-}
-
-{
-  // 直接粘贴带后缀的已发消息
-  const { handlers } = await loadPlugin();
-  const sent = await send(handlers, makeSession(), `粘贴的已发消息${GAP_SUFFIX}`);
-  check("粘贴已发消息时剥掉尾部后缀", sent.text.startsWith("粘贴的已发消息\n\n[2026-"), true);
-  check("粘贴已发消息后时间戳不重复", sent.text.split("\n\n[").length - 1, 1);
-}
 
 {
   // 认不出的方括号后缀按原样保留，本插件的后缀另行追加

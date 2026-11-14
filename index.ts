@@ -16,9 +16,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_before_tree", async (event, ctx) => {
     const targetId = event.preparation.targetId;
     const restored = readRestoredEditorText(ctx.sessionManager, targetId);
-    // 发送端兜底：记住回填原文，提交时据此剥除其中的后缀
-    state.restoredEditorText = restored;
-    // 回填端：pi 稍后会把原文写进编辑器，这里提前算好剥净的版本
+    // pi 稍后会把原文写进编辑器，这里提前算好剥净的版本
     state.pendingEditorText = restored === null ? null : stripTimestampSuffix(restored);
   });
 

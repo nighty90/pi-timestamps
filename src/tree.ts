@@ -1,5 +1,3 @@
-import { stripTimestampSuffix } from "./format.ts";
-import { state } from "./state.ts";
 
 /** 把消息 content 转成 pi 回填编辑器时的文本形式：文本块直接拼接。 */
 function contentToText(content: unknown): string {
@@ -40,8 +38,7 @@ function entryRestoreText(entry: SessionEntryLike): string | null {
 }
 
 /**
- * 取出 /tree 选中条目在回填时写入编辑器的文本。回填端与发送端都要用它，
- * 发送端用于定位并剥除回填文本里的后缀。
+ * 取出 /tree 选中条目在回填时写入编辑器的文本。
  */
 export function readRestoredEditorText(
   sessionManager: { getEntry(id: string): SessionEntryLike },
@@ -51,20 +48,6 @@ export function readRestoredEditorText(
   return entryRestoreText(sessionManager.getEntry(targetId));
 }
 
-/** 剥除回填文本带来的后缀：先按回填原文前缀替换，再兜底剥一次末尾残留。 */
-export function stripRestoredSuffixes(rawText: string): string {
-  const restored = state.restoredEditorText;
-  state.restoredEditorText = null;
-
-  let text = rawText;
-  if (restored !== null && text.startsWith(restored)) {
-    const strippedRestored = stripTimestampSuffix(restored);
-    if (strippedRestored !== restored) {
-      text = strippedRestored + text.slice(restored.length);
-    }
-  }
-  return stripTimestampSuffix(text);
-}
 
 /**
  * 分支上最近一条用户消息的落盘时刻（毫秒）。会话恢复与 /tree 换分支后叶子已经

@@ -6,7 +6,7 @@ import type {
 import { buildTimestampSuffix } from "./format.ts";
 import { settings } from "./config.ts";
 import { SKIP } from "./state.ts";
-import { lastUserMessageAt, stripRestoredSuffixes } from "./tree.ts";
+import { lastUserMessageAt } from "./tree.ts";
 
 /**
  * 斜杠命令不加后缀：pi 在 input hook 之后才展开技能与模板，后缀会污染
@@ -18,7 +18,7 @@ function isSlashCommand(text: string): boolean {
 
 /** `input` hook 主体：决定本次消息要不要注入时间戳。 */
 export function handleInput(event: InputEvent, ctx: ExtensionContext): InputEventResult {
-  const text = stripRestoredSuffixes(event.text);
+  const text = event.text;
 
   // 纯图片消息没有文本：不注入
   if (text.trim() === "") return SKIP;
