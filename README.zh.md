@@ -71,10 +71,10 @@ pi install git:github.com/nighty90/pi-timestamps
 
 ## 致谢
 
-代码由 [pi](https://pi.dev/) 驱动 `deepseek-flash` 编写。
+代码由 [pi](https://pi.dev/) 驱动 `DeepSeek-V4.1-Flash-1017` 编写。
 
 - 人类（nighty90）负责：需求与设计决策、方向取舍与否决项、代码审阅、真实环境验收
-- 模型（deepseek-flash）负责：查阅 pi 源码与扩展 API、实现与重构、测试与注释维护
+- 模型（DeepSeek）负责：查阅 pi 源码与扩展 API、实现与重构、测试与注释维护
 
 ## 许可
 

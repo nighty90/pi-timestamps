@@ -71,10 +71,10 @@ The switch and the threshold are managed by `/timestamp`. Changes take effect im
 
 ## Credits
 
-The code was written by [pi](https://pi.dev/) driving `deepseek-flash`.
+The code was written by [pi](https://pi.dev/) driving `DeepSeek-V4.1-Flash-1017`.
 
 - Human (nighty90): requirements and design decisions, trade-offs and rejections, code review, real-environment acceptance
-- Model (deepseek-flash): reading pi's source and extension API, implementation and refactoring, tests and comments
+- Model (DeepSeek): reading pi's source and extension API, implementation and refactoring, tests and comments
 
 ## License
 
